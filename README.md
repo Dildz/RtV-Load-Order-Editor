@@ -58,3 +58,4 @@ the path becomes invalid.
 - save button needs to save & close - if it's left open & the game opens, & the 'Compatibilty' feature in Mod Loader is used, then the game crashes.
 - make the Notes / Warnings txt window bigger by default
 - test with more mods, fix bugs & release as an exe
+- if 'Clothes to Rags' is installed, & if mod numbers get close to or could exceed 200 - add 100 so that it always loads last
