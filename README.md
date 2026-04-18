@@ -52,3 +52,9 @@ the path becomes invalid.
 | `config_io.py` | `mod_config.cfg` read/write + rolling backups |
 | `_validate.py` | Standalone CLI dump of scan + analyze results |
 | `app_settings.json` | Auto-created on first run |
+
+## To Do
+
+- save button needs to save & close - if it's left open & the game opens, & the 'Compatibilty' feature in Mod Loader is used, then the game crashes.
+- make the Notes / Warnings txt window bigger by default
+- test with more mods, fix bugs & release as an exe
