@@ -271,11 +271,11 @@ class App(ctk.CTk):
         self.notes_box.configure(state="disabled")
         paned.add(notes_container, minsize=100, stretch="never")
 
-        # Set initial split: notes pane gets ~1/4 of the window height
+        # Set initial split: notes pane gets ~40% of the window height
         def _initial_split():
             self.update_idletasks()
             h = self.winfo_height()
-            notes_h = max(220, int(h * 0.27))
+            notes_h = max(320, int(h * 0.40))
             paned.sash_place(0, 1, h - notes_h)
         self.after(80, _initial_split)
 
@@ -287,9 +287,6 @@ class App(ctk.CTk):
             text_color=COLOR_TEXT_MUTED, anchor="w",
         )
         self.footer_label.pack(side="left", fill="x", expand=True)
-
-        # Set initial split: notes pane gets ~180px from the bottom
-        self.after(50, lambda: paned.sash_place(0, 1, self.winfo_height() - 200))
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -427,7 +424,9 @@ class App(ctk.CTk):
         if not messagebox.askyesno(
             "Save mod_config.cfg?",
             f"Write current load order to:\n{MOD_CONFIG_FILE}\n\n"
-            "A backup will be created automatically.",
+            "A backup will be created automatically.\n\n"
+            "The editor will close after saving — leaving it open while the "
+            "game runs the Mod Loader 'Compatibility' check can crash the game.",
         ):
             return
         try:
@@ -436,8 +435,8 @@ class App(ctk.CTk):
             messagebox.showerror("Save failed", str(e))
             return
         self.dirty = False
-        self._set_status("Saved.")
         messagebox.showinfo("Saved", "mod_config.cfg has been updated.\nLaunch Road to Vostok to verify.")
+        self.destroy()
 
     def _on_refresh(self):
         if self.dirty and not messagebox.askyesno(

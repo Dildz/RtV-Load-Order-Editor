@@ -19,6 +19,14 @@ from vmz_scanner import ModInfo
 PRIORITY_STEP = 5
 PRIORITY_START = 5
 
+# A locked mod (one with a declared priority in mod.txt) usually picks a high
+# number because the author wants it to load last. If many other mods crowd up
+# to that value, the intended separation is lost. When a locked mod is the
+# top-priority mod AND another mod's priority gets within LOCKED_BUMP_BUFFER
+# of it, bump the locked mod by LOCKED_BUMP_AMOUNT to restore the gap.
+LOCKED_BUMP_BUFFER = 20
+LOCKED_BUMP_AMOUNT = 100
+
 # Plain-English descriptions for Godot lifecycle functions
 LIFECYCLE_DESCRIPTIONS = {
     "_ready": "startup code (runs when the character spawns)",
@@ -298,6 +306,31 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                     f'needs a HIGHER number than "{name_for[src]}" (load order {assigned[src]}). '
                     f'Manually change "{name_for[dst]}" to a number greater than {assigned[src]}.'
                 )
+
+    # Bump locked mods that are being crowded from below. Process highest-first
+    # so a bumped value is reflected in the "others_max" check for the next one.
+    locked_recs_desc = sorted(
+        (r for r in recs if r.locked), key=lambda r: r.priority, reverse=True,
+    )
+    for lr in locked_recs_desc:
+        others_max = max(
+            (r.priority for r in recs if r is not lr), default=0,
+        )
+        if lr.priority >= others_max and others_max >= lr.priority - LOCKED_BUMP_BUFFER:
+            new_priority = max(
+                lr.priority + LOCKED_BUMP_AMOUNT,
+                others_max + LOCKED_BUMP_AMOUNT,
+            )
+            notes.append(
+                f'"{lr.display_name}" was bumped from {lr.priority} to {new_priority} '
+                f'so it stays separated from the other mods (which reach {others_max}) '
+                f'and continues to load last.'
+            )
+            lr.reason = (
+                f"{lr.reason}; bumped from {lr.priority} → {new_priority} "
+                f"to preserve load-last intent"
+            )
+            lr.priority = new_priority
 
     # Sort final list by priority for display
     recs.sort(key=lambda r: (r.priority, r.filename.lower()))
