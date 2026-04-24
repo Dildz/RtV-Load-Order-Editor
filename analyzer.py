@@ -8,24 +8,40 @@ Rules:
   B must load AFTER A (B gets higher priority value). Otherwise B is silently lost.
 - Two mods both overriding F without super = conflict. Severity depends on how
   much of each mod is broken when it loses (see _consequence below).
+- A mod using take_over_path() on res://Scripts/X.gd fully replaces that script
+  at runtime. Any mod extending X via `extends` must load AFTER the takeover mod
+  or it will inherit from the wrong (vanilla) version. Two takeovers on the same
+  base is a hard conflict — only the highest-priority one sticks.
 """
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 
-from vmz_scanner import ModInfo
+from vmz_scanner import MCM_MOD_ID, ModInfo
 
 PRIORITY_STEP = 5
 PRIORITY_START = 5
 
-# A locked mod (one with a declared priority in mod.txt) usually picks a high
-# number because the author wants it to load last. If many other mods crowd up
-# to that value, the intended separation is lost. When a locked mod is the
-# top-priority mod AND another mod's priority gets within LOCKED_BUMP_BUFFER
-# of it, bump the locked mod by LOCKED_BUMP_AMOUNT to restore the gap.
-LOCKED_BUMP_BUFFER = 20
+# Every positive-declared locked mod is placed at least this far above the
+# next-lower mod, rounded up to a clean multiple, so "load last" locked mods
+# don't get crowded as the mod count grows.
 LOCKED_BUMP_AMOUNT = 100
+
+
+def _round_up(n: int, step: int) -> int:
+    """Smallest multiple of `step` that is >= n."""
+    return ((n + step - 1) // step) * step
+
+# File extensions that are documentation / repo metadata rather than game
+# content. Overlaps on these paths don't affect gameplay and would just add
+# noise to the warnings list.
+NONGAMEPLAY_SUFFIXES = (
+    ".md", ".txt", ".rst", ".yml", ".yaml",
+    ".gitignore", ".gitattributes", ".license",
+    "license", "changelog", "readme",
+)
 
 # Plain-English descriptions for Godot lifecycle functions
 LIFECYCLE_DESCRIPTIONS = {
@@ -66,6 +82,19 @@ def _severity(func_name: str, total_overrides: int) -> str:
     return "minor"
 
 
+def _is_gameplay_path(res_path: str) -> bool:
+    """True if the path is a file that actually affects the game.
+
+    Archives often ship README.md / CHANGELOG.md / LICENSE at the root; those
+    collisions are real but harmless and would otherwise flood warnings.
+    """
+    lower = res_path.lower()
+    for suf in NONGAMEPLAY_SUFFIXES:
+        if lower.endswith(suf):
+            return False
+    return True
+
+
 @dataclass
 class Recommendation:
     """One mod's recommended state in the proposed load order."""
@@ -103,7 +132,95 @@ def _build_constraints(
         m.filename: sum(len(ovr.functions) for ovr in m.overrides) for m in mods
     }
 
+    # ── Duplicate mod IDs ──────────────────────────────────────────────
+    # Metro Mod Loader silently drops duplicates; the user must disable one.
+    by_id: dict[str, list[str]] = defaultdict(list)
+    for m in mods:
+        if m.mod_id:
+            by_id[m.mod_id].append(m.filename)
+    for mid, owners in by_id.items():
+        if len(owners) >= 2:
+            listed = ", ".join(f'"{name_for[o]}"' for o in owners)
+            warnings.append(
+                f'Duplicate mod id "{mid}" is used by {listed}. '
+                f'The mod loader will only load one — disable the duplicates to choose which one.'
+            )
+            # All but the first are candidates for disable
+            suggest_disable.extend(owners[1:])
+
+    # ── Duplicate class_name declarations ──────────────────────────────
+    # In Godot, two scripts sharing `class_name X` cause a project-load
+    # error on boot — the game will not launch at all. Treat as hard
+    # conflict: keep the biggest mod, suggest disabling the rest.
+    by_class: dict[str, list[str]] = defaultdict(list)
+    for m in mods:
+        for cn in m.class_names:
+            by_class[cn].append(m.filename)
+    for cn, owners in by_class.items():
+        uniq = list(dict.fromkeys(owners))  # preserve order, drop repeats
+        if len(uniq) >= 2:
+            listed = ", ".join(f'"{name_for[o]}"' for o in uniq)
+            keeper = max(uniq, key=lambda n: total_funcs.get(n, 0))
+            losers = [o for o in uniq if o != keeper]
+            disable_names = ", ".join(f'"{name_for[o]}"' for o in losers)
+            warnings.append(
+                f'Multiple mods declare `class_name {cn}`: {listed}. '
+                f'Godot refuses to load a project with duplicate class names — '
+                f'the game will not boot with all of these enabled.\n'
+                f'  -> Recommended fix: keep "{name_for[keeper]}" enabled and '
+                f'disable {disable_names}.'
+            )
+            suggest_disable.extend(losers)
+
+    # ── Duplicate autoload names ───────────────────────────────────────
+    # If two mods declare the same [autoload] entry (e.g. Main=... or Config=...),
+    # only one actually loads. The other's entry point never runs.
+    by_autoload: dict[str, list[str]] = defaultdict(list)
+    for m in mods:
+        for autoload_name in m.autoloads:
+            by_autoload[autoload_name].append(m.filename)
+    for autoload_name, owners in by_autoload.items():
+        if len(owners) >= 2:
+            listed = ", ".join(f'"{name_for[o]}"' for o in owners)
+            warnings.append(
+                f'Multiple mods declare the same autoload name "{autoload_name}": {listed}. '
+                f'Only one will actually load — the others\' entry points will silently fail. '
+                f'The mod authors should rename to something more specific.'
+            )
+
+    # ── File-path overlaps ─────────────────────────────────────────────
+    # If two archives ship the same res:// path (e.g. both have their own
+    # Character.gd at res://Scripts/Character.gd), the higher-priority one wins
+    # at mount time and the other is dropped silently.
+    by_path: dict[str, list[str]] = defaultdict(list)
+    for m in mods:
+        for p in m.file_paths:
+            if _is_gameplay_path(p):
+                by_path[p].append(m.filename)
+    # Collapse per-file overlaps into per-mod-pair overlaps to keep warnings tidy.
+    pair_to_paths: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for p, owners in by_path.items():
+        if len(owners) >= 2:
+            key = tuple(sorted(owners))
+            pair_to_paths[key].append(p)
+    for owners, paths in pair_to_paths.items():
+        listed = ", ".join(f'"{name_for[o]}"' for o in owners)
+        if len(paths) == 1:
+            detail = paths[0]
+        else:
+            detail = f"{len(paths)} shared paths (first: {paths[0]})"
+        warnings.append(
+            f'{listed} ship the same file path: {detail}. '
+            f'The highest-priority mod wins; the others\' copy of that file is dropped.'
+        )
+
+    # ── Function-level override constraints ────────────────────────────
     # Group: (base_script, func_name) -> list of (mod_filename, calls_super)
+    #
+    # Takeover overrides participate here too: when multiple mods take over the
+    # same base, they form an inheritance chain via their own `extends`, and
+    # each mod's function overrides are subject to the same super() resolution
+    # rules as any other extender.
     groups: dict[tuple[str, str], list[tuple[str, bool]]] = {}
     for m in mods:
         for ovr in m.overrides:
@@ -187,6 +304,74 @@ def _build_constraints(
                 + f'\n  [technical: {base}.{func}()]'
             )
 
+    # ── take_over_path() constraints ───────────────────────────────────
+    # A mod T that calls take_over_path on res://Scripts/B.gd fully replaces
+    # B at runtime. Any mod E that does `extends "res://Scripts/B.gd"` must
+    # load AFTER T, or E's parent class will be resolved against the vanilla
+    # (pre-takeover) version and E will silently inherit the wrong thing.
+    takeover_mods_by_base: dict[str, list[str]] = defaultdict(list)
+    extender_mods_by_base: dict[str, set[str]] = defaultdict(set)
+    for m in mods:
+        for ovr in m.overrides:
+            if ovr.takes_over_base:
+                takeover_mods_by_base[ovr.base_script].append(m.filename)
+            else:
+                extender_mods_by_base[ovr.base_script].add(m.filename)
+
+    for base, tmods in takeover_mods_by_base.items():
+        extenders = extender_mods_by_base.get(base, set())
+        for t in tmods:
+            for e in extenders:
+                if e == t:
+                    continue
+                edges[t].add(e)
+                notes.append(
+                    f'"{name_for[e]}" must have a HIGHER load order number than '
+                    f'"{name_for[t]}", or "{name_for[e]}" will inherit from the wrong '
+                    f'(vanilla) version of {base}.gd.  '
+                    f'[technical: "{name_for[t]}" replaces res://Scripts/{base}.gd via take_over_path()]'
+                )
+
+        # Multiple takeovers on the same base are NOT automatically a conflict.
+        # Each mod's script extends res://Scripts/<base>.gd, and when loaded in
+        # order they form an inheritance chain through whichever mod's script
+        # currently occupies that path. All of them coexist as long as any
+        # function they share resolves cleanly via super() — which the
+        # function-level analysis above has already emitted edges/warnings for.
+        #
+        # So: no forced keeper, no "one wins" warning — just an info note so
+        # the user knows a chain is forming.
+        if len(tmods) >= 2:
+            listed = ", ".join(f'"{name_for[t]}"' for t in tmods)
+            notes.append(
+                f'{listed} all replace res://Scripts/{base}.gd via take_over_path. '
+                f'They stack via inheritance — each mod inherits from the one loaded '
+                f'before it, so all of their features remain active. '
+                f'Any function that multiple of them override without super() is listed '
+                f'above as a separate conflict.'
+            )
+
+    # ── Mod Configuration Menu soft dependency ─────────────────────────
+    # Mods that reference res://ModConfigurationMenu/... need MCM to load
+    # before them, otherwise their config UI never appears. MCM ships with
+    # priority=-100 so this is usually automatic, but we surface the edge so
+    # the final-sweep check can catch unusual user configurations.
+    mcm_mod = next((m for m in mods if m.mod_id == MCM_MOD_ID), None)
+    if mcm_mod:
+        for m in mods:
+            if m.uses_mcm and m.filename != mcm_mod.filename:
+                edges[mcm_mod.filename].add(m.filename)
+    else:
+        mcm_users = [m for m in mods if m.uses_mcm]
+        if mcm_users:
+            listed = ", ".join(f'"{m.display_name}"' for m in mcm_users[:8])
+            more = "" if len(mcm_users) <= 8 else f" (+{len(mcm_users) - 8} more)"
+            warnings.append(
+                f'{len(mcm_users)} mod(s) reference Mod Configuration Menu but MCM is not '
+                f'installed: {listed}{more}. Their in-game settings UIs will not appear. '
+                f'Install "Mod Configuration Menu" from ModWorkshop to enable them.'
+            )
+
     return edges, warnings, notes, suggest_disable
 
 
@@ -241,23 +426,60 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     sorted_free, cycle_warnings = _topo_sort(free_names, edges)
     warnings.extend(cycle_warnings)
 
-    locked_values = {m.declared_priority for m in locked}
-    locked_priority_by_name = {m.filename: m.declared_priority for m in locked}
+    # Pre-compute effective priorities for locked mods. Positive-declared
+    # locked mods are bumped to LOCKED_BUMP_AMOUNT above the projected free-mod
+    # ceiling, rounded up to a clean multiple, cascading upward so each locked
+    # mod stays clear of the ones below it. Negative/zero values signal
+    # "load early" intent and are left alone.
+    estimated_free_max = PRIORITY_START + PRIORITY_STEP * max(len(free) - 1, 0)
+    effective_priority: dict[str, int] = {
+        m.filename: m.declared_priority for m in locked
+    }
+    bump_info: dict[str, tuple[int, int]] = {}  # filename -> (original, new)
 
-    # Assign priorities in steps of PRIORITY_STEP, skipping any value already
-    # used by a locked mod to avoid silent collisions.
+    positive_locked = sorted(
+        (m for m in locked if m.declared_priority > 0),
+        key=lambda m: m.declared_priority,
+    )
+    floor = estimated_free_max
+    for m in positive_locked:
+        target = _round_up(floor + LOCKED_BUMP_AMOUNT, LOCKED_BUMP_AMOUNT)
+        original = effective_priority[m.filename]
+        if original < target:
+            bump_info[m.filename] = (original, target)
+            effective_priority[m.filename] = target
+        floor = max(floor, effective_priority[m.filename])
+
+    locked_values = set(effective_priority.values())
+
+    # Build locked recommendations using their effective (possibly bumped) values.
     recs: list[Recommendation] = []
     for m in locked:
+        pri = effective_priority[m.filename]
+        if m.filename in bump_info:
+            original, _ = bump_info[m.filename]
+            reason = (
+                f"declared in mod.txt (priority={original}); bumped to {pri} "
+                f"so it stays above the other mods and continues to load last"
+            )
+            notes.append(
+                f'"{m.display_name}" was bumped from {original} to {pri} '
+                f'so it stays separated from the other mods and continues to load last.'
+            )
+        else:
+            reason = f"declared in mod.txt (priority={pri})"
         recs.append(Recommendation(
             filename=m.filename,
             display_name=m.display_name,
-            priority=m.declared_priority,
+            priority=pri,
             locked=True,
-            reason=f"declared in mod.txt (priority={m.declared_priority})",
+            reason=reason,
         ))
 
+    # Assign free-mod priorities in steps of PRIORITY_STEP, skipping any value
+    # already used by a locked mod to avoid silent collisions.
     by_name = {m.filename: m for m in free}
-    assigned: dict[str, int] = dict(locked_priority_by_name)
+    assigned: dict[str, int] = dict(effective_priority)
     next_value = PRIORITY_START
 
     for fname in sorted_free:
@@ -266,10 +488,11 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
             next_value += 1
 
         # If any locked mod must load BEFORE this free mod, ensure our value
-        # is greater than the locked mod's value.
-        for locked_name, locked_pri in locked_priority_by_name.items():
+        # is greater than the locked mod's effective value. Round up to the
+        # next clean PRIORITY_STEP multiple so the free-mod grid stays tidy.
+        for locked_name, locked_pri in effective_priority.items():
             if fname in edges.get(locked_name, set()) and next_value <= locked_pri:
-                next_value = locked_pri + 1
+                next_value = _round_up(locked_pri + 1, PRIORITY_STEP)
                 while next_value in locked_values:
                     next_value += 1
 
@@ -307,32 +530,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                     f'Manually change "{name_for[dst]}" to a number greater than {assigned[src]}.'
                 )
 
-    # Bump locked mods that are being crowded from below. Process highest-first
-    # so a bumped value is reflected in the "others_max" check for the next one.
-    locked_recs_desc = sorted(
-        (r for r in recs if r.locked), key=lambda r: r.priority, reverse=True,
-    )
-    for lr in locked_recs_desc:
-        others_max = max(
-            (r.priority for r in recs if r is not lr), default=0,
-        )
-        if lr.priority >= others_max and others_max >= lr.priority - LOCKED_BUMP_BUFFER:
-            new_priority = max(
-                lr.priority + LOCKED_BUMP_AMOUNT,
-                others_max + LOCKED_BUMP_AMOUNT,
-            )
-            notes.append(
-                f'"{lr.display_name}" was bumped from {lr.priority} to {new_priority} '
-                f'so it stays separated from the other mods (which reach {others_max}) '
-                f'and continues to load last.'
-            )
-            lr.reason = (
-                f"{lr.reason}; bumped from {lr.priority} → {new_priority} "
-                f"to preserve load-last intent"
-            )
-            lr.priority = new_priority
-
-    # Sort final list by priority for display
+    # Sort final list by priority (low to high) for display
     recs.sort(key=lambda r: (r.priority, r.filename.lower()))
 
     return AnalysisResult(

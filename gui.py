@@ -9,6 +9,7 @@ import customtkinter as ctk
 
 from analyzer import PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze
 from config_io import ModConfig, read_config, sync_with_mods, write_config
+from mod_patcher import extract_modworkshop_id, patch_mod_archive
 from paths import MOD_CONFIG_FILE, get_mods_folder, verify_mod_config_exists
 from vmz_scanner import ModInfo, scan_mods_folder
 
@@ -161,6 +162,196 @@ class ModRow(ctk.CTkFrame):
         return self.enabled_var.get()
 
 
+class MissingUpdatesDialog(ctk.CTkToplevel):
+    """Modal-ish dialog listing mods missing [updates]/modworkshop id, with
+    a URL entry per mod. On Update, extracts the numeric mod id from each URL
+    and rewrites the corresponding .vmz with the added lines.
+    """
+
+    def __init__(self, master, missing_mods, mods_folder, on_complete):
+        super().__init__(master)
+        self.title("Missing Update Links")
+        self.geometry("760x560")
+        self.minsize(620, 360)
+        self.configure(fg_color=COLOR_BG)
+
+        self.missing_mods = missing_mods
+        self.mods_folder = mods_folder
+        self.on_complete = on_complete
+
+        self.url_vars: dict[str, ctk.StringVar] = {}
+        self.status_labels: dict[str, ctk.CTkLabel] = {}
+
+        self._build_ui()
+
+        # Focus + stay on top of the main window
+        self.after(80, self._grab_focus)
+
+    def _grab_focus(self):
+        try:
+            self.transient(self.master)
+            self.grab_set()
+        except Exception:
+            pass
+        self.lift()
+        self.focus_force()
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=18, pady=(16, 4))
+        ctk.CTkLabel(
+            header, text="Missing Update Links",
+            font=FONT_TITLE, text_color=COLOR_TEXT, anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            header,
+            text=(
+                f"{len(self.missing_mods)} mod(s) have no [updates]/modworkshop line in mod.txt. "
+                "Paste each mod's ModWorkshop URL and press Update — the .vmz will be rewritten "
+                "with a .bak backup of the original."
+            ),
+            font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=700,
+        ).pack(anchor="w", pady=(2, 0))
+
+        list_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        list_frame.pack(fill="both", expand=True, padx=18, pady=(8, 8))
+
+        for mod in self.missing_mods:
+            row = ctk.CTkFrame(
+                list_frame, fg_color=COLOR_CARD, corner_radius=8,
+                border_width=1, border_color=COLOR_BORDER,
+            )
+            row.pack(fill="x", pady=4)
+
+            name_block = ctk.CTkFrame(row, fg_color="transparent")
+            name_block.pack(fill="x", padx=12, pady=(8, 2))
+            ctk.CTkLabel(
+                name_block, text=mod.display_name, anchor="w",
+                font=FONT_BODY, text_color=COLOR_TEXT,
+            ).pack(side="left")
+            ctk.CTkLabel(
+                name_block, text=mod.filename, anchor="w",
+                font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
+            ).pack(side="left", padx=(8, 0))
+
+            entry_block = ctk.CTkFrame(row, fg_color="transparent")
+            entry_block.pack(fill="x", padx=12, pady=(0, 4))
+            var = ctk.StringVar(value="")
+            self.url_vars[mod.filename] = var
+            entry = ctk.CTkEntry(
+                entry_block, textvariable=var,
+                placeholder_text="https://modworkshop.net/mod/...",
+                height=30, font=FONT_BODY, corner_radius=6,
+            )
+            entry.pack(fill="x")
+            entry.bind("<FocusOut>", lambda e, fn=mod.filename: self._validate_row(fn))
+
+            status = ctk.CTkLabel(
+                row, text="", anchor="w",
+                font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
+            )
+            status.pack(fill="x", padx=12, pady=(0, 8))
+            self.status_labels[mod.filename] = status
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(
+            footer, text="Cancel", width=110, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=self.destroy,
+        ).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(
+            footer, text="Update", width=130, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_HV,
+            command=self._on_update,
+        ).pack(side="right")
+
+    def _validate_row(self, filename: str) -> str | None:
+        """Show inline status for one row; return extracted id or None."""
+        url = self.url_vars[filename].get().strip()
+        status = self.status_labels[filename]
+        if not url:
+            status.configure(text="", text_color=COLOR_TEXT_MUTED)
+            return None
+        mod_id = extract_modworkshop_id(url)
+        if mod_id:
+            status.configure(text=f"Detected mod id: {mod_id}", text_color=COLOR_PRIMARY)
+            return mod_id
+        status.configure(
+            text="Could not find a mod id in this URL (expected modworkshop.net/mod/<number>)",
+            text_color=COLOR_WARNING,
+        )
+        return None
+
+    def _on_update(self):
+        to_patch: list[tuple[str, str]] = []   # (filename, mod_id)
+        has_error = False
+
+        for mod in self.missing_mods:
+            url = self.url_vars[mod.filename].get().strip()
+            if not url:
+                self.status_labels[mod.filename].configure(text="", text_color=COLOR_TEXT_MUTED)
+                continue
+            mod_id = extract_modworkshop_id(url)
+            if not mod_id:
+                has_error = True
+                self.status_labels[mod.filename].configure(
+                    text="Invalid URL — skipped.", text_color=COLOR_WARNING,
+                )
+                continue
+            to_patch.append((mod.filename, mod_id))
+
+        if not to_patch:
+            messagebox.showwarning(
+                "Nothing to update",
+                "No valid ModWorkshop URLs were provided.",
+                parent=self,
+            )
+            return
+
+        success: list[str] = []
+        failures: list[tuple[str, str]] = []  # (filename, error)
+        for filename, mod_id in to_patch:
+            archive = self.mods_folder / filename
+            try:
+                patch_mod_archive(archive, mod_id)
+                success.append(filename)
+                self.status_labels[filename].configure(
+                    text=f"Patched with modworkshop={mod_id} (backup: {filename}.bak)",
+                    text_color=COLOR_PRIMARY,
+                )
+            except Exception as e:
+                failures.append((filename, str(e)))
+                self.status_labels[filename].configure(
+                    text=f"Failed: {e}", text_color=COLOR_WARNING,
+                )
+
+        summary_lines = []
+        if success:
+            summary_lines.append(f"Patched {len(success)} mod(s).")
+        if failures:
+            summary_lines.append(f"{len(failures)} failed:")
+            summary_lines.extend(f"  - {fn}: {err}" for fn, err in failures)
+
+        messagebox.showinfo(
+            "Missing Update Links",
+            "\n".join(summary_lines) if summary_lines else "Nothing changed.",
+            parent=self,
+        )
+
+        if success and not failures and not has_error:
+            # Clean exit — refresh main window and close
+            self.on_complete()
+            self.destroy()
+        elif success:
+            # Partial — refresh main but leave dialog open so user can see
+            # remaining entries
+            self.on_complete()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -208,6 +399,14 @@ class App(ctk.CTk):
             command=self._on_refresh,
         )
         self.refresh_btn.pack(side="left", padx=4)
+
+        self.missing_updates_btn = ctk.CTkButton(
+            button_block, text="Missing Update Links", width=170, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=self._on_missing_updates,
+        )
+        self.missing_updates_btn.pack(side="left", padx=4)
 
         self.analyze_btn = ctk.CTkButton(
             button_block, text="Analyze Mods", width=130, height=34,
@@ -437,6 +636,16 @@ class App(ctk.CTk):
         self.dirty = False
         messagebox.showinfo("Saved", "mod_config.cfg has been updated.\nLaunch Road to Vostok to verify.")
         self.destroy()
+
+    def _on_missing_updates(self):
+        missing = [m for m in self.scanned_mods if not m.modworkshop_id]
+        if not missing:
+            messagebox.showinfo(
+                "Missing Update Links",
+                "Every mod already declares a ModWorkshop update link. Nothing to patch.",
+            )
+            return
+        MissingUpdatesDialog(self, missing, self.mods_folder, self._load_from_disk)
 
     def _on_refresh(self):
         if self.dirty and not messagebox.askyesno(

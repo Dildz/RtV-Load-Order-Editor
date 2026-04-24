@@ -2,3 +2,9 @@ __pycache__
 .claude
 RtV_LoadOrder_Editor.zip
 app_settings.json
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+RtV_LoE.png
