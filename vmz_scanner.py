@@ -69,6 +69,7 @@ class ModInfo:
     display_name: str              # from mod.txt name=, fallback to filename
     declared_priority: int | None  # from mod.txt priority=, None if absent
     mod_id: str | None = None
+    mod_version: str | None = None  # from mod.txt [mod] version=
     autoloads: dict[str, str] = field(default_factory=dict)   # name -> res:// path
     restart_autoloads: list[str] = field(default_factory=list)  # autoload names with '!' prefix
     file_paths: list[str] = field(default_factory=list)        # res:// paths shipped by archive
@@ -78,6 +79,18 @@ class ModInfo:
     parse_errors: list[str] = field(default_factory=list)
     class_names: list[str] = field(default_factory=list)           # `class_name X` declarations
     takeover_targets: set[str] = field(default_factory=set)        # base script names (e.g. "Character") this mod replaces
+
+    @property
+    def cfg_key(self) -> str:
+        """Identifier used in mod_config.cfg by Metro Mod Loader.
+
+        Format: "<mod_id>@<version>" if both are present, otherwise
+        "zip:<filename>" — matches MML's own fallback for mods missing
+        id/version in mod.txt.
+        """
+        if self.mod_id and self.mod_version:
+            return f"{self.mod_id}@{self.mod_version}"
+        return f"zip:{self.filename}"
 
 
 def _strip_quotes(s: str) -> str:
@@ -164,9 +177,9 @@ def _parse_mod_txt(text: str) -> dict[str, dict[str, str]]:
 
 
 def _extract_mod_meta(sections: dict[str, dict[str, str]]) -> tuple[
-    str | None, int | None, str | None
+    str | None, int | None, str | None, str | None
 ]:
-    """Pull (display_name, declared_priority, mod_id) from parsed mod.txt.
+    """Pull (display_name, declared_priority, mod_id, version) from parsed mod.txt.
 
     A declared priority of 0 is treated as unset — many mod authors include
     `priority=0` as a placeholder rather than an intentional value, so we let
@@ -175,6 +188,7 @@ def _extract_mod_meta(sections: dict[str, dict[str, str]]) -> tuple[
     mod = sections.get("mod", {})
     name = mod.get("name") or None
     mod_id = mod.get("id") or None
+    version = mod.get("version") or None
 
     pri: int | None = None
     if "priority" in mod:
@@ -184,7 +198,7 @@ def _extract_mod_meta(sections: dict[str, dict[str, str]]) -> tuple[
             pri = None
         if pri == 0:
             pri = None
-    return name, pri, mod_id
+    return name, pri, mod_id, version
 
 
 def _extract_updates_id(sections: dict[str, dict[str, str]]) -> str | None:
@@ -236,11 +250,12 @@ def scan_archive(path: Path) -> ModInfo:
                 try:
                     text = zf.read(mod_txt_name).decode("utf-8", errors="replace")
                     sections = _parse_mod_txt(text)
-                    name, pri, mod_id = _extract_mod_meta(sections)
+                    name, pri, mod_id, version = _extract_mod_meta(sections)
                     if name:
                         info.display_name = name
                     info.declared_priority = pri
                     info.mod_id = mod_id
+                    info.mod_version = version
                     info.autoloads, info.restart_autoloads = _extract_autoloads(sections)
                     info.modworkshop_id = _extract_updates_id(sections)
                 except Exception as e:

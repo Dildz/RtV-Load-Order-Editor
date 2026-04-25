@@ -98,7 +98,7 @@ def _is_gameplay_path(res_path: str) -> bool:
 @dataclass
 class Recommendation:
     """One mod's recommended state in the proposed load order."""
-    filename: str
+    cfg_key: str          # mod-id@version (or zip:filename fallback)
     display_name: str
     priority: int
     locked: bool          # True if priority came from mod.txt declaration
@@ -110,7 +110,7 @@ class AnalysisResult:
     recommendations: list[Recommendation]
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
-    suggest_disable: list[str] = field(default_factory=list)  # mod filenames
+    suggest_disable: list[str] = field(default_factory=list)  # cfg keys
 
 
 def _build_constraints(
@@ -119,17 +119,17 @@ def _build_constraints(
     """Return (edges, warnings, notes, suggest_disable).
 
     edges[a] = set of mods that must load AFTER a (i.e. a -> b means a loads before b).
-    suggest_disable: mod filenames the user should consider disabling (when a
+    suggest_disable: cfg keys the user should consider disabling (when a
         conflict has no resolvable load order).
     """
-    edges: dict[str, set[str]] = {m.filename: set() for m in mods}
+    edges: dict[str, set[str]] = {m.cfg_key: set() for m in mods}
     warnings: list[str] = []
     notes: list[str] = []
     suggest_disable: list[str] = []
 
-    name_for = {m.filename: m.display_name for m in mods}
+    name_for = {m.cfg_key: m.display_name for m in mods}
     total_funcs = {
-        m.filename: sum(len(ovr.functions) for ovr in m.overrides) for m in mods
+        m.cfg_key: sum(len(ovr.functions) for ovr in m.overrides) for m in mods
     }
 
     # ── Duplicate mod IDs ──────────────────────────────────────────────
@@ -137,7 +137,7 @@ def _build_constraints(
     by_id: dict[str, list[str]] = defaultdict(list)
     for m in mods:
         if m.mod_id:
-            by_id[m.mod_id].append(m.filename)
+            by_id[m.mod_id].append(m.cfg_key)
     for mid, owners in by_id.items():
         if len(owners) >= 2:
             listed = ", ".join(f'"{name_for[o]}"' for o in owners)
@@ -155,7 +155,7 @@ def _build_constraints(
     by_class: dict[str, list[str]] = defaultdict(list)
     for m in mods:
         for cn in m.class_names:
-            by_class[cn].append(m.filename)
+            by_class[cn].append(m.cfg_key)
     for cn, owners in by_class.items():
         uniq = list(dict.fromkeys(owners))  # preserve order, drop repeats
         if len(uniq) >= 2:
@@ -178,7 +178,7 @@ def _build_constraints(
     by_autoload: dict[str, list[str]] = defaultdict(list)
     for m in mods:
         for autoload_name in m.autoloads:
-            by_autoload[autoload_name].append(m.filename)
+            by_autoload[autoload_name].append(m.cfg_key)
     for autoload_name, owners in by_autoload.items():
         if len(owners) >= 2:
             listed = ", ".join(f'"{name_for[o]}"' for o in owners)
@@ -196,7 +196,7 @@ def _build_constraints(
     for m in mods:
         for p in m.file_paths:
             if _is_gameplay_path(p):
-                by_path[p].append(m.filename)
+                by_path[p].append(m.cfg_key)
     # Collapse per-file overlaps into per-mod-pair overlaps to keep warnings tidy.
     pair_to_paths: dict[tuple[str, ...], list[str]] = defaultdict(list)
     for p, owners in by_path.items():
@@ -226,7 +226,7 @@ def _build_constraints(
         for ovr in m.overrides:
             for fn in ovr.functions:
                 groups.setdefault((ovr.base_script, fn.name), []).append(
-                    (m.filename, fn.calls_super)
+                    (m.cfg_key, fn.calls_super)
                 )
 
     for (base, func), members in groups.items():
@@ -314,9 +314,9 @@ def _build_constraints(
     for m in mods:
         for ovr in m.overrides:
             if ovr.takes_over_base:
-                takeover_mods_by_base[ovr.base_script].append(m.filename)
+                takeover_mods_by_base[ovr.base_script].append(m.cfg_key)
             else:
-                extender_mods_by_base[ovr.base_script].add(m.filename)
+                extender_mods_by_base[ovr.base_script].add(m.cfg_key)
 
     for base, tmods in takeover_mods_by_base.items():
         extenders = extender_mods_by_base.get(base, set())
@@ -359,8 +359,8 @@ def _build_constraints(
     mcm_mod = next((m for m in mods if m.mod_id == MCM_MOD_ID), None)
     if mcm_mod:
         for m in mods:
-            if m.uses_mcm and m.filename != mcm_mod.filename:
-                edges[mcm_mod.filename].add(m.filename)
+            if m.uses_mcm and m.cfg_key != mcm_mod.cfg_key:
+                edges[mcm_mod.cfg_key].add(m.cfg_key)
     else:
         mcm_users = [m for m in mods if m.uses_mcm]
         if mcm_users:
@@ -422,8 +422,8 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
 
     edges, warnings, notes, suggest_disable = _build_constraints(mods)
 
-    free_names = [m.filename for m in free]
-    sorted_free, cycle_warnings = _topo_sort(free_names, edges)
+    free_keys = [m.cfg_key for m in free]
+    sorted_free, cycle_warnings = _topo_sort(free_keys, edges)
     warnings.extend(cycle_warnings)
 
     # Pre-compute effective priorities for locked mods. Positive-declared
@@ -433,7 +433,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     # "load early" intent and are left alone.
     estimated_free_max = PRIORITY_START + PRIORITY_STEP * max(len(free) - 1, 0)
     effective_priority: dict[str, int] = {
-        m.filename: m.declared_priority for m in locked
+        m.cfg_key: m.declared_priority for m in locked
     }
     bump_info: dict[str, tuple[int, int]] = {}  # filename -> (original, new)
 
@@ -444,20 +444,20 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     floor = estimated_free_max
     for m in positive_locked:
         target = _round_up(floor + LOCKED_BUMP_AMOUNT, LOCKED_BUMP_AMOUNT)
-        original = effective_priority[m.filename]
+        original = effective_priority[m.cfg_key]
         if original < target:
-            bump_info[m.filename] = (original, target)
-            effective_priority[m.filename] = target
-        floor = max(floor, effective_priority[m.filename])
+            bump_info[m.cfg_key] = (original, target)
+            effective_priority[m.cfg_key] = target
+        floor = max(floor, effective_priority[m.cfg_key])
 
     locked_values = set(effective_priority.values())
 
     # Build locked recommendations using their effective (possibly bumped) values.
     recs: list[Recommendation] = []
     for m in locked:
-        pri = effective_priority[m.filename]
-        if m.filename in bump_info:
-            original, _ = bump_info[m.filename]
+        pri = effective_priority[m.cfg_key]
+        if m.cfg_key in bump_info:
+            original, _ = bump_info[m.cfg_key]
             reason = (
                 f"declared in mod.txt (priority={original}); bumped to {pri} "
                 f"so it stays above the other mods and continues to load last"
@@ -469,7 +469,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         else:
             reason = f"declared in mod.txt (priority={pri})"
         recs.append(Recommendation(
-            filename=m.filename,
+            cfg_key=m.cfg_key,
             display_name=m.display_name,
             priority=pri,
             locked=True,
@@ -478,11 +478,11 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
 
     # Assign free-mod priorities in steps of PRIORITY_STEP, skipping any value
     # already used by a locked mod to avoid silent collisions.
-    by_name = {m.filename: m for m in free}
+    by_name = {m.cfg_key: m for m in free}
     assigned: dict[str, int] = dict(effective_priority)
     next_value = PRIORITY_START
 
-    for fname in sorted_free:
+    for key in sorted_free:
         # Bump past any value already used by a locked mod
         while next_value in locked_values:
             next_value += 1
@@ -490,13 +490,13 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         # If any locked mod must load BEFORE this free mod, ensure our value
         # is greater than the locked mod's effective value. Round up to the
         # next clean PRIORITY_STEP multiple so the free-mod grid stays tidy.
-        for locked_name, locked_pri in effective_priority.items():
-            if fname in edges.get(locked_name, set()) and next_value <= locked_pri:
+        for locked_key, locked_pri in effective_priority.items():
+            if key in edges.get(locked_key, set()) and next_value <= locked_pri:
                 next_value = _round_up(locked_pri + 1, PRIORITY_STEP)
                 while next_value in locked_values:
                     next_value += 1
 
-        m = by_name[fname]
+        m = by_name[key]
         if not m.overrides:
             reason = "no script overrides — order doesn't matter"
         else:
@@ -504,19 +504,19 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
             reason = f"overrides {', '.join(touched)}"
 
         recs.append(Recommendation(
-            filename=fname,
+            cfg_key=key,
             display_name=m.display_name,
             priority=next_value,
             locked=False,
             reason=reason,
         ))
-        assigned[fname] = next_value
+        assigned[key] = next_value
         next_value += PRIORITY_STEP
 
     # Final sweep: verify every constraint edge is satisfied. Anything still
     # broken (e.g. free mod must load BEFORE a locked mod with a low value) is
     # flagged for manual user fix.
-    name_for = {m.filename: m.display_name for m in mods}
+    name_for = {m.cfg_key: m.display_name for m in mods}
     for src, dsts in edges.items():
         if src not in assigned:
             continue
@@ -531,7 +531,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 )
 
     # Sort final list by priority (low to high) for display
-    recs.sort(key=lambda r: (r.priority, r.filename.lower()))
+    recs.sort(key=lambda r: (r.priority, r.cfg_key.lower()))
 
     return AnalysisResult(
         recommendations=recs,

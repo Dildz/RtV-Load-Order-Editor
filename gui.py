@@ -1,6 +1,7 @@
 """customtkinter GUI for RtV load order editor."""
 from __future__ import annotations
 
+import shutil
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
@@ -30,8 +31,12 @@ COLOR_PRIMARY     = "#2d8f47"  # green for save
 COLOR_PRIMARY_HV  = "#3aa055"
 COLOR_ACCENT      = "#1f6feb"  # blue for analyze
 COLOR_ACCENT_HV   = "#2d7df0"
-COLOR_NEUTRAL     = "#3a3a3a"
+COLOR_NEUTRAL     = "#3a3a3a"  # grey for refresh
 COLOR_NEUTRAL_HV  = "#4a4a4a"
+COLOR_TEAL        = "#0d9488"  # teal for rename .zip → .vmz
+COLOR_TEAL_HV     = "#14b8a6"
+COLOR_PURPLE      = "#7c3aed"  # purple for missing updates
+COLOR_PURPLE_HV   = "#8b4dff"
 
 # ── Fonts ──────────────────────────────────────────────────────────────────
 FONT_TITLE   = ("Segoe UI", 18, "bold")
@@ -47,7 +52,7 @@ class ModRow(ctk.CTkFrame):
     def __init__(
         self,
         master,
-        filename: str,
+        cfg_key: str,
         display_name: str,
         priority: int,
         enabled: bool,
@@ -64,7 +69,7 @@ class ModRow(ctk.CTkFrame):
             border_color=COLOR_BORDER,
             height=46,
         )
-        self.filename = filename
+        self.cfg_key = cfg_key
         self.locked = locked
         self.suggest_disable = suggest_disable
         self.on_change = on_change
@@ -98,7 +103,7 @@ class ModRow(ctk.CTkFrame):
         self.label.grid(row=0, column=1, sticky="w", padx=(0, 4))
 
         self.subtitle = ctk.CTkLabel(
-            self, text=filename, anchor="w",
+            self, text=cfg_key, anchor="w",
             font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
         )
         self.subtitle.grid(row=0, column=2, sticky="w", padx=(0, 8))
@@ -117,14 +122,14 @@ class ModRow(ctk.CTkFrame):
             self, text="▲", width=30, height=30,
             corner_radius=6,
             fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
-            command=lambda: self.on_move(self.filename, -1),
+            command=lambda: self.on_move(self.cfg_key, -1),
         )
         self.up_btn.grid(row=0, column=4, padx=2, pady=8)
         self.down_btn = ctk.CTkButton(
             self, text="▼", width=30, height=30,
             corner_radius=6,
             fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
-            command=lambda: self.on_move(self.filename, +1),
+            command=lambda: self.on_move(self.cfg_key, +1),
         )
         self.down_btn.grid(row=0, column=5, padx=(2, 12), pady=8)
 
@@ -142,7 +147,7 @@ class ModRow(ctk.CTkFrame):
         self.configure(fg_color=COLOR_CARD)
 
     def _enabled_changed(self):
-        self.on_change(self.filename, "enabled", self.enabled_var.get())
+        self.on_change(self.cfg_key, "enabled", self.enabled_var.get())
 
     def _priority_changed(self):
         try:
@@ -150,7 +155,7 @@ class ModRow(ctk.CTkFrame):
         except ValueError:
             self.priority_var.set("0")
             v = 0
-        self.on_change(self.filename, "priority", v)
+        self.on_change(self.cfg_key, "priority", v)
 
     def get_priority(self) -> int:
         try:
@@ -352,6 +357,145 @@ class MissingUpdatesDialog(ctk.CTkToplevel):
             self.on_complete()
 
 
+class RenameZipsDialog(ctk.CTkToplevel):
+    """Dialog listing .zip mods with per-row checkboxes + select-all. On
+    Rename, copies the selected originals to a 'renamed mods' subfolder as
+    backup, then renames the .zip files in place to .vmz.
+    """
+
+    def __init__(self, master, zip_paths, mods_folder, on_complete):
+        super().__init__(master)
+        self.title("Rename .zip → .vmz")
+        self.geometry("620x520")
+        self.minsize(520, 320)
+        self.configure(fg_color=COLOR_BG)
+
+        self.zip_paths = zip_paths
+        self.mods_folder = mods_folder
+        self.on_complete = on_complete
+        self.checkbox_vars: dict[str, ctk.BooleanVar] = {}
+
+        self._build_ui()
+        self.after(80, self._grab_focus)
+
+    def _grab_focus(self):
+        try:
+            self.transient(self.master)
+            self.grab_set()
+        except Exception:
+            pass
+        self.lift()
+        self.focus_force()
+
+    def _build_ui(self):
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=18, pady=(16, 4))
+        ctk.CTkLabel(
+            header, text="Rename .zip → .vmz",
+            font=FONT_TITLE, text_color=COLOR_TEXT, anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            header,
+            text=(
+                f"{len(self.zip_paths)} .zip mod(s) found. Tick the ones to "
+                "rename, then click Rename. Originals are copied to a "
+                "'renamed mods' folder inside your mods folder as backup."
+            ),
+            font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
+            anchor="w", justify="left", wraplength=560,
+        ).pack(anchor="w", pady=(2, 0))
+
+        toggle_bar = ctk.CTkFrame(self, fg_color="transparent")
+        toggle_bar.pack(fill="x", padx=18, pady=(8, 0))
+        self.select_all_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            toggle_bar, text="Select all",
+            variable=self.select_all_var,
+            command=self._toggle_all,
+            font=FONT_BODY,
+        ).pack(anchor="w")
+
+        list_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        list_frame.pack(fill="both", expand=True, padx=18, pady=(8, 8))
+
+        for path in self.zip_paths:
+            row = ctk.CTkFrame(
+                list_frame, fg_color=COLOR_CARD, corner_radius=8,
+                border_width=1, border_color=COLOR_BORDER,
+            )
+            row.pack(fill="x", pady=3)
+            var = ctk.BooleanVar(value=True)
+            self.checkbox_vars[path.name] = var
+            ctk.CTkCheckBox(
+                row, text=path.name,
+                variable=var, font=FONT_BODY,
+                text_color=COLOR_TEXT,
+            ).pack(anchor="w", padx=12, pady=8)
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(
+            footer, text="Cancel", width=110, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=self.destroy,
+        ).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(
+            footer, text="Rename", width=130, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_TEAL, hover_color=COLOR_TEAL_HV,
+            command=self._on_rename,
+        ).pack(side="right")
+
+    def _toggle_all(self):
+        value = self.select_all_var.get()
+        for var in self.checkbox_vars.values():
+            var.set(value)
+
+    def _on_rename(self):
+        selected = [p for p in self.zip_paths if self.checkbox_vars[p.name].get()]
+        if not selected:
+            messagebox.showwarning(
+                "Nothing selected",
+                "Tick at least one mod to rename.",
+                parent=self,
+            )
+            return
+
+        backup_dir = self.mods_folder / "renamed mods"
+        try:
+            backup_dir.mkdir(exist_ok=True)
+        except Exception as e:
+            messagebox.showerror(
+                "Could not create backup folder",
+                f"{backup_dir}\n\n{e}",
+                parent=self,
+            )
+            return
+
+        success: list[str] = []
+        failures: list[tuple[str, str]] = []
+        for src in selected:
+            try:
+                shutil.copy2(src, backup_dir / src.name)
+                src.rename(src.with_suffix(".vmz"))
+                success.append(src.name)
+            except Exception as e:
+                failures.append((src.name, str(e)))
+
+        summary = [f"Renamed {len(success)} of {len(selected)} mod(s)."]
+        if success:
+            summary.append(f"\nOriginals backed up to:\n  {backup_dir}")
+        if failures:
+            summary.append("\nFailures:")
+            summary.extend(f"  - {fn}: {err}" for fn, err in failures)
+        messagebox.showinfo("Rename .zip → .vmz", "\n".join(summary), parent=self)
+
+        if success:
+            self.on_complete()
+            self.destroy()
+
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -393,23 +537,31 @@ class App(ctk.CTk):
         button_block.pack(side="right")
 
         self.refresh_btn = ctk.CTkButton(
-            button_block, text="Refresh", width=96, height=34,
+            button_block, text="Refresh", width=80, height=34,
             corner_radius=8, font=FONT_BODY,
             fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
             command=self._on_refresh,
         )
         self.refresh_btn.pack(side="left", padx=4)
 
-        self.missing_updates_btn = ctk.CTkButton(
-            button_block, text="Missing Update Links", width=170, height=34,
+        self.rename_btn = ctk.CTkButton(
+            button_block, text="Rename .zip → .vmz", width=140, height=34,
             corner_radius=8, font=FONT_BODY,
-            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            fg_color=COLOR_TEAL, hover_color=COLOR_TEAL_HV,
+            command=self._on_rename_zips,
+        )
+        self.rename_btn.pack(side="left", padx=4)
+
+        self.missing_updates_btn = ctk.CTkButton(
+            button_block, text="Missing Update Links", width=150, height=34,
+            corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_PURPLE, hover_color=COLOR_PURPLE_HV,
             command=self._on_missing_updates,
         )
         self.missing_updates_btn.pack(side="left", padx=4)
 
         self.analyze_btn = ctk.CTkButton(
-            button_block, text="Analyze Mods", width=130, height=34,
+            button_block, text="Analyze Mods", width=110, height=34,
             corner_radius=8, font=FONT_BODY,
             fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HV,
             command=self._on_analyze,
@@ -417,7 +569,7 @@ class App(ctk.CTk):
         self.analyze_btn.pack(side="left", padx=4)
 
         self.apply_btn = ctk.CTkButton(
-            button_block, text="Save & Apply", width=130, height=34,
+            button_block, text="Save & Apply", width=110, height=34,
             corner_radius=8, font=FONT_BODY,
             fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_HV,
             command=self._on_apply,
@@ -505,36 +657,52 @@ class App(ctk.CTk):
     def _load_from_disk(self):
         self.scanned_mods = scan_mods_folder(self.mods_folder)
         self.cfg = read_config(MOD_CONFIG_FILE)
-        sync_with_mods(self.cfg, [m.filename for m in self.scanned_mods])
+        sync_with_mods(self.cfg, [m.cfg_key for m in self.scanned_mods])
+
+        # Drop orphan cfg entries (no matching file on disk). Happens when a
+        # mod is updated in-game — the old version's cfg_key lingers but the
+        # .vmz it referred to has been replaced by the new version, which
+        # sync_with_mods adds as a separate entry. The cfg backup (.bak.1)
+        # preserves the original on Save in case anything was important.
+        on_disk_keys = {m.cfg_key for m in self.scanned_mods}
+        orphans = [k for k in self.cfg.order if k not in on_disk_keys]
+        for key in orphans:
+            self.cfg.enabled.pop(key, None)
+            self.cfg.priority.pop(key, None)
+        if orphans:
+            self.cfg.order = [k for k in self.cfg.order if k not in set(orphans)]
 
         # Reorder cfg.order so it matches priority value (low → high) for display
-        self.cfg.order.sort(key=lambda fn: (self.cfg.priority.get(fn, 0), fn.lower()))
+        self.cfg.order.sort(key=lambda k: (self.cfg.priority.get(k, 0), k.lower()))
 
         self._rebuild_rows()
-        self._set_status(f"{len(self.scanned_mods)} mods loaded")
+        status = f"{len(self.scanned_mods)} mods loaded"
+        if orphans:
+            status += f"  |  {len(orphans)} stale entry(s) removed — Save to persist"
+        self._set_status(status)
         self.footer_label.configure(text=f"Mods folder:  {self.mods_folder}")
-        self.dirty = False
+        self.dirty = bool(orphans)
 
     def _rebuild_rows(self):
         for row in self.rows:
             row.destroy()
         self.rows = []
 
-        names_by_file = {m.filename: m for m in self.scanned_mods}
+        mods_by_key = {m.cfg_key: m for m in self.scanned_mods}
 
-        for fname in self.cfg.order:
-            mod_info = names_by_file.get(fname)
-            display_name = mod_info.display_name if mod_info else fname
+        for key in self.cfg.order:
+            mod_info = mods_by_key.get(key)
+            display_name = mod_info.display_name if mod_info else key
             locked = mod_info.declared_priority is not None if mod_info else False
 
             row = ModRow(
                 self.list_frame,
-                filename=fname,
+                cfg_key=key,
                 display_name=display_name,
-                priority=self.cfg.priority.get(fname, 0),
-                enabled=self.cfg.enabled.get(fname, True),
+                priority=self.cfg.priority.get(key, 0),
+                enabled=self.cfg.enabled.get(key, True),
                 locked=locked,
-                suggest_disable=fname in self.suggest_disable,
+                suggest_disable=key in self.suggest_disable,
                 on_change=self._on_row_change,
                 on_move=self._on_row_move,
             )
@@ -543,17 +711,17 @@ class App(ctk.CTk):
 
     # ── actions ──────────────────────────────────────────────────────────────
 
-    def _on_row_change(self, filename: str, field: str, value):
+    def _on_row_change(self, cfg_key: str, field: str, value):
         if field == "enabled":
-            self.cfg.enabled[filename] = bool(value)
+            self.cfg.enabled[cfg_key] = bool(value)
         elif field == "priority":
-            self.cfg.priority[filename] = int(value)
+            self.cfg.priority[cfg_key] = int(value)
         self.dirty = True
         self._set_status("Unsaved changes")
 
-    def _on_row_move(self, filename: str, delta: int):
+    def _on_row_move(self, cfg_key: str, delta: int):
         try:
-            idx = self.cfg.order.index(filename)
+            idx = self.cfg.order.index(cfg_key)
         except ValueError:
             return
         new_idx = idx + delta
@@ -562,9 +730,9 @@ class App(ctk.CTk):
 
         # Swap priorities with the neighbour, then swap order
         other = self.cfg.order[new_idx]
-        p1 = self.cfg.priority.get(filename, 0)
+        p1 = self.cfg.priority.get(cfg_key, 0)
         p2 = self.cfg.priority.get(other, 0)
-        self.cfg.priority[filename] = p2
+        self.cfg.priority[cfg_key] = p2
         self.cfg.priority[other] = p1
         self.cfg.order[idx], self.cfg.order[new_idx] = self.cfg.order[new_idx], self.cfg.order[idx]
 
@@ -581,12 +749,12 @@ class App(ctk.CTk):
         self._apply_recommendation(result)
 
     def _apply_recommendation(self, result: AnalysisResult):
-        self.cfg.order = [r.filename for r in result.recommendations]
+        self.cfg.order = [r.cfg_key for r in result.recommendations]
         self.suggest_disable = set(result.suggest_disable)
 
         # Auto-disable mods flagged as dead — user can re-enable manually if desired
-        for fname in self.suggest_disable:
-            self.cfg.enabled[fname] = False
+        for key in self.suggest_disable:
+            self.cfg.enabled[key] = False
 
         # Renumber priorities: locked mods keep their declared value, disabled
         # mods get 0 (so they don't waste a number that an enabled mod could use),
@@ -595,24 +763,24 @@ class App(ctk.CTk):
         next_value = PRIORITY_START
         for r in result.recommendations:
             if r.locked:
-                self.cfg.priority[r.filename] = r.priority
+                self.cfg.priority[r.cfg_key] = r.priority
                 continue
-            if not self.cfg.enabled.get(r.filename, True):
-                self.cfg.priority[r.filename] = 0
+            if not self.cfg.enabled.get(r.cfg_key, True):
+                self.cfg.priority[r.cfg_key] = 0
                 continue
             while next_value in locked_values:
                 next_value += 1
-            self.cfg.priority[r.filename] = next_value
+            self.cfg.priority[r.cfg_key] = next_value
             next_value += PRIORITY_STEP
 
         # Re-sort cfg.order to reflect the new priority values
-        self.cfg.order.sort(key=lambda fn: (self.cfg.priority.get(fn, 0), fn.lower()))
+        self.cfg.order.sort(key=lambda k: (self.cfg.priority.get(k, 0), k.lower()))
 
         # Carry over any cfg-only mods (in cfg but not on disk) at the end
-        on_disk = {m.filename for m in self.scanned_mods}
-        for fn in list(self.cfg.priority.keys()):
-            if fn not in on_disk and fn not in self.cfg.order:
-                self.cfg.order.append(fn)
+        on_disk = {m.cfg_key for m in self.scanned_mods}
+        for k in list(self.cfg.priority.keys()):
+            if k not in on_disk and k not in self.cfg.order:
+                self.cfg.order.append(k)
 
         self._rebuild_rows()
         self._show_notes(result)
@@ -654,6 +822,16 @@ class App(ctk.CTk):
         ):
             return
         self._load_from_disk()
+
+    def _on_rename_zips(self):
+        zip_paths = sorted(self.mods_folder.glob("*.zip"))
+        if not zip_paths:
+            messagebox.showinfo(
+                "Rename .zip → .vmz",
+                "No .zip mod files found in the mods folder.",
+            )
+            return
+        RenameZipsDialog(self, zip_paths, self.mods_folder, self._load_from_disk)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 

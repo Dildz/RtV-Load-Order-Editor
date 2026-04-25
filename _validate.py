@@ -25,6 +25,8 @@ def main() -> None:
         print(f"\n  {m.filename}")
         print(f"    name: {m.display_name}")
         print(f"    id: {m.mod_id or '(none)'}")
+        print(f"    version: {m.mod_version or '(none)'}")
+        print(f"    cfg_key: {m.cfg_key}")
         print(f"    declared priority: {pri}")
         if m.autoloads:
             al = ", ".join(f"{k}={v}" for k, v in m.autoloads.items())
@@ -55,7 +57,7 @@ def main() -> None:
     result = analyze(mods)
     for r in result.recommendations:
         lock = " [LOCKED]" if r.locked else ""
-        print(f"  {r.priority:>5}  {r.filename}{lock}")
+        print(f"  {r.priority:>5}  {r.cfg_key}{lock}")
         print(f"          -> {r.reason}")
 
     if result.warnings:
@@ -84,6 +86,8 @@ def main() -> None:
     print("=" * 70)
     if MOD_CONFIG_FILE.exists():
         cfg = read_config(MOD_CONFIG_FILE)
+        print(f"  active_profile: {cfg.active_profile}")
+        print(f"  developer_mode: {cfg.developer_mode}\n")
         for name in cfg.order:
             en = cfg.enabled.get(name, "?")
             pr = cfg.priority.get(name, "?")

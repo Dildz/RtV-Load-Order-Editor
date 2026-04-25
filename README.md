@@ -4,6 +4,12 @@ Standalone Python app that scans your installed Road to Vostok mods and writes
 an optimal load order into the Mod Configuration Menu config file.
 
 Must have [Metro Mod Loader](https://modworkshop.net/mod/55623) installed.
+[Mod Configuration Menu](https://modworkshop.net/mod/53713) recommended.
+
+## Update Note
+
+> **v1.1.0+** targets Metro Mod Loader's new profile-based `mod_config.cfg` format (v3.1.0). > If you're still on MML v2, use [v1.0.0](https://github.com/Dildz/RtV-Load-Order-Editor/releases/tag/v1.0.0) instead
+> The two formats aren't compatible and this version won't read the old one.
 
 ## Usage
 
@@ -29,7 +35,13 @@ path becomes invalid.
 Typical flow: **Refresh** to scan → **Analyze** to get a recommended order →
 adjust enabled state / priority as needed → **Save** to write
 `mod_config.cfg`. Use **Missing Update Links** if any mods are missing the
-`[updates]` block needed for in-game update checks.
+`[updates]` block needed for in-game update checks. Use **Rename .zip →
+.vmz** to bulk-convert legacy `.zip` archives to the newer `.vmz` extension.
+
+Stale cfg entries — left behind when a mod is updated or removed outside
+the editor (e.g. via the in-game loader, which leaves an old
+`mod-id@<old-version>` key pointing at a file that's no longer there) —
+are dropped automatically on load. Click Save to persist the cleaned cfg.
 
 ## How it works
 
@@ -71,9 +83,17 @@ adjust enabled state / priority as needed → **Save** to write
    update check). Paste the mod's ModWorkshop URL per row; the numeric ID is
    extracted, `mod.txt` is patched, and the `.vmz` is rewritten. The original
    archive is kept as `.vmz.bak`.
-6. **Save** — writes back to `%APPDATA%\Road to Vostok\mod_config.cfg`. The
-   previous file is rotated into `mod_config.cfg.bak.1` (up to 10 backups
-   kept).
+6. **Rename .zip → .vmz** — opens a checklist of every `.zip` mod in the
+   folder. Tick the ones to convert and click Rename — originals are copied
+   to a `renamed mods` subfolder as backup, then the `.zip` files are
+   renamed to `.vmz` in place.
+7. **Save** — writes back to `%APPDATA%\Road to Vostok\mod_config.cfg` using
+   MML's profile format (`[profile.<active>.enabled]` /
+   `[profile.<active>.priority]` keyed by `mod-id@version`, falling back to
+   `zip:<filename>` for mods missing either field). Only the active profile
+   is read and written — multi-profile editing is out of scope, so entries
+   under other profile names are dropped on save. The previous file is
+   rotated into `mod_config.cfg.bak.1` (up to 10 backups kept).
 
 ### Known limits
 
@@ -98,19 +118,12 @@ overrides of removed/renamed engine scripts may slip through.
 
 ## Build
 
-Produces `dist/RtV_LoadOrder_Editor.exe` (single-file, windowed, ~18 MB).
-
-```
-pip install pyinstaller pillow
-python -c "from PIL import Image; Image.open('RtV_LoE.png').save('RtV_LoE.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
-pyinstaller --noconfirm --onefile --windowed --name "RtV_LoadOrder_Editor" --icon RtV_LoE.ico --collect-all customtkinter main.py
-```
-
-`--collect-all customtkinter` is required — customtkinter ships JSON theme
-assets that PyInstaller won't pick up otherwise.
+Releases are built in CI from `.github/workflows/release.yml` — every
+`v*` tag pushed to GitHub triggers a Windows build and publishes the exe +
+SHA256 to the Releases page.
 
 ## To Do
 
-- test with more mods, fix remaining bugs
+- test with more mods, fix any remaining bugs
 - cross-reference vanilla scripts inside `RTV.pck` to catch version-mismatch
   overrides
