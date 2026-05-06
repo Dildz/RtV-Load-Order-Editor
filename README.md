@@ -33,6 +33,9 @@ multi-drive setups are covered). If it can't find the game it falls back to
 a folder picker. Either way the path is saved and you won't be asked again
 unless it becomes invalid.
 
+On every launch a small loading window shows the scan progress; the main
+window appears fully painted when ready, instead of building piece by piece.
+
 Typical flow: **Refresh** to scan → **Analyze** to get a recommended order →
 adjust enabled state / priority as needed → **Save** to write
 `mod_config.cfg`. Use **Missing Update Links** if any mods are missing the
