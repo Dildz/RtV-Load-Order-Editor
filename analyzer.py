@@ -24,6 +24,7 @@ from vmz_scanner import MCM_MOD_ID, ModInfo
 PRIORITY_STEP = 5
 PRIORITY_START = 5
 MAX_PRIORITY = 999
+MIN_PRIORITY = -999
 
 # Every positive-declared locked mod is placed at least this far above the
 # next-lower mod, rounded up to a clean multiple, so "load last" locked mods
@@ -433,8 +434,11 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     # mod stays clear of the ones below it. Negative/zero values signal
     # "load early" intent and are left alone.
     estimated_free_max = PRIORITY_START + PRIORITY_STEP * max(len(free) - 1, 0)
+    # Clamp declared priorities into MML's valid range up front so a wildly
+    # large declared value (e.g. 5000) can't silently collide at the MAX cap.
     effective_priority: dict[str, int] = {
-        m.cfg_key: m.declared_priority for m in locked
+        m.cfg_key: max(MIN_PRIORITY, min(m.declared_priority, MAX_PRIORITY))
+        for m in locked
     }
     bump_info: dict[str, tuple[int, int]] = {}  # filename -> (original, new)
 
@@ -443,20 +447,53 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         key=lambda m: m.declared_priority,
     )
     floor = estimated_free_max
-    for m in positive_locked:
+    overflow_start: int | None = None
+    for i, m in enumerate(positive_locked):
         target = _round_up(floor + LOCKED_BUMP_AMOUNT, LOCKED_BUMP_AMOUNT)
+        if target > MAX_PRIORITY:
+            overflow_start = i
+            break
         original = effective_priority[m.cfg_key]
         if original < target:
             bump_info[m.cfg_key] = (original, target)
             effective_priority[m.cfg_key] = target
         floor = max(floor, effective_priority[m.cfg_key])
 
+    # When the natural LOCKED_BUMP_AMOUNT cascade would exceed MAX_PRIORITY,
+    # pack the remaining positive-locked mods densely at the top
+    # (MAX_PRIORITY-(k-1) .. MAX_PRIORITY) so every one keeps a unique value
+    # while preserving declared-priority order. Without this, the previous
+    # min(..., MAX_PRIORITY) cap collapsed all overflowing mods onto 999 and
+    # MML resolved the tie by mod_name — silent and unstable across renames.
+    if overflow_start is not None:
+        remaining = positive_locked[overflow_start:]
+        k = len(remaining)
+        first_target = MAX_PRIORITY - (k - 1)
+        if first_target <= floor:
+            warnings.append(
+                f"Too many locked-priority mods to fit unique values under "
+                f"{MAX_PRIORITY}. Some will end up sharing a priority and MML "
+                f"will break the tie by name."
+            )
+            first_target = max(floor + 1, first_target)
+        for idx, rm in enumerate(remaining):
+            t = min(first_target + idx, MAX_PRIORITY)
+            original = effective_priority[rm.cfg_key]
+            if original != t:
+                bump_info[rm.cfg_key] = (original, t)
+                effective_priority[rm.cfg_key] = t
+        notes.append(
+            f"{k} locked-priority mod(s) packed densely at the top because the "
+            f"natural {LOCKED_BUMP_AMOUNT}-step cascade would exceed {MAX_PRIORITY}."
+        )
+
     locked_values = set(effective_priority.values())
 
     # Build locked recommendations using their effective (possibly bumped) values.
+    # effective_priority is already clamped to [MIN_PRIORITY, MAX_PRIORITY].
     recs: list[Recommendation] = []
     for m in locked:
-        pri = min(effective_priority[m.cfg_key], MAX_PRIORITY)
+        pri = effective_priority[m.cfg_key]
         if m.cfg_key in bump_info:
             original, _ = bump_info[m.cfg_key]
             reason = (
@@ -478,14 +515,21 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         ))
 
     # Assign free-mod priorities in steps of PRIORITY_STEP, skipping any value
-    # already used by a locked mod to avoid silent collisions.
+    # already used by a locked mod to avoid silent collisions. When the
+    # step-PRIORITY_STEP grid would exceed MAX_PRIORITY, fall back to grabbing
+    # the next unused slot below MAX_PRIORITY by walking downward — silently
+    # capping multiple mods at MAX_PRIORITY produced ties that MML resolved
+    # by mod_name, which is unstable across archive renames.
     by_name = {m.cfg_key: m for m in free}
     assigned: dict[str, int] = dict(effective_priority)
+    used_priorities: set[int] = set(locked_values)
     next_value = PRIORITY_START
+    next_top_slot = MAX_PRIORITY  # descending cursor for overflow fallback
+    overflow_warned = False
 
     for key in sorted_free:
-        # Bump past any value already used by a locked mod
-        while next_value in locked_values:
+        # Bump past any value already used (by a locked mod or a prior free mod)
+        while next_value in used_priorities:
             next_value += 1
 
         # If any locked mod must load BEFORE this free mod, ensure our value
@@ -494,7 +538,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         for locked_key, locked_pri in effective_priority.items():
             if key in edges.get(locked_key, set()) and next_value <= locked_pri:
                 next_value = _round_up(locked_pri + 1, PRIORITY_STEP)
-                while next_value in locked_values:
+                while next_value in used_priorities:
                     next_value += 1
 
         m = by_name[key]
@@ -504,15 +548,36 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
             touched = sorted({ovr.base_script for ovr in m.overrides})
             reason = f"overrides {', '.join(touched)}"
 
-        capped = min(next_value, MAX_PRIORITY)
+        if next_value <= MAX_PRIORITY:
+            slot = next_value
+        else:
+            # Step-grid overflowed MAX_PRIORITY. Walk down from the top looking
+            # for any unused slot. next_top_slot is monotonically decreasing so
+            # total work stays O(MAX_PRIORITY) across the whole loop.
+            while next_top_slot >= PRIORITY_START and next_top_slot in used_priorities:
+                next_top_slot -= 1
+            if next_top_slot >= PRIORITY_START:
+                slot = next_top_slot
+                next_top_slot -= 1
+            else:
+                slot = MAX_PRIORITY
+                if not overflow_warned:
+                    warnings.append(
+                        f"More mods than available priority slots in "
+                        f"[{PRIORITY_START}, {MAX_PRIORITY}]. Some mods will "
+                        f"share a priority and MML will load them by name."
+                    )
+                    overflow_warned = True
+
         recs.append(Recommendation(
             cfg_key=key,
             display_name=m.display_name,
-            priority=capped,
+            priority=slot,
             locked=False,
             reason=reason,
         ))
-        assigned[key] = capped
+        assigned[key] = slot
+        used_priorities.add(slot)
         next_value += PRIORITY_STEP
 
     # Final sweep: verify every constraint edge is satisfied. Anything still
@@ -531,6 +596,23 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                     f'needs a HIGHER number than "{name_for[src]}" (load order {assigned[src]}). '
                     f'Manually change "{name_for[dst]}" to a number greater than {assigned[src]}.'
                 )
+
+    # Tie detection — safety net for declared-priority collisions that the
+    # packing logic above couldn't separate (e.g. two authors both declaring
+    # priority=500 in mod.txt). MML breaks ties by mod_name, which can change
+    # after an archive rename, so surface this rather than ship silently.
+    by_value: dict[int, list[str]] = defaultdict(list)
+    for k, v in assigned.items():
+        by_value[v].append(k)
+    for v, owners in sorted(by_value.items()):
+        if len(owners) >= 2:
+            listed = ", ".join(f'"{name_for[o]}"' for o in owners)
+            warnings.append(
+                f'Load order {v} is shared by {len(owners)} mods: {listed}. '
+                f'Metro Mod Loader breaks ties by mod name, which can change '
+                f'after an archive rename. Manually adjust their priorities '
+                f'so each mod has a unique number.'
+            )
 
     # Sort final list by priority (low to high) for display
     recs.sort(key=lambda r: (r.priority, r.cfg_key.lower()))
