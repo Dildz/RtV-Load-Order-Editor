@@ -38,6 +38,14 @@ TAKE_OVER_SCRIPT_CALLEE_RE = re.compile(
 MCM_REF_RE = re.compile(r'res://ModConfigurationMenu/')
 SECTION_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$')
 KV_RE = re.compile(r'^\s*([^=\s]+)\s*=\s*(.*)$')
+# VostokMods naming convention: a filename like "100-MyMod.vmz" implies a
+# fallback priority of 100 when mod.txt doesn't declare one. Mirrors MML's
+# _re_filename_priority in mod_discovery.gd.
+FILENAME_PRIORITY_RE = re.compile(r'^(-?\d+)-(.+)$')
+
+# MML's valid priority range (mod_discovery.gd clamps to this).
+PRIORITY_MIN = -999
+PRIORITY_MAX = 999
 
 # Archive-internal paths we don't treat as "real" conflict surface. The
 # .godot/ tree is engine-generated import cache — every mod has its own
@@ -288,6 +296,17 @@ def scan_archive(path: Path) -> ModInfo:
                     info.parse_errors.append(f"mod.txt: {e}")
             else:
                 info.parse_errors.append("no mod.txt found")
+
+            # VostokMods compat: fallback to filename priority prefix
+            # ("100-MyMod.vmz" -> priority=100) when mod.txt didn't declare one.
+            if info.declared_priority is None:
+                fm = FILENAME_PRIORITY_RE.match(path.stem)
+                if fm:
+                    try:
+                        pri = int(fm.group(1))
+                        info.declared_priority = max(PRIORITY_MIN, min(pri, PRIORITY_MAX))
+                    except ValueError:
+                        pass
 
             # File manifest — everything the archive ships, minus engine cache.
             # Directories end with "/" in zipfile.namelist(); skip them.
