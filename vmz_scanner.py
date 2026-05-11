@@ -232,11 +232,14 @@ def _extract_script_extend_targets(sections: dict[str, dict[str, str]]) -> set[s
     We only need the LEFT side (vanilla path being replaced) to extract the base
     name so the analyzer's chain-conflict logic treats it like any other takeover.
     `script_overrides` is the legacy alias for `script_extend`; both are accepted.
+
+    Keys may be quoted in real mods (TraderTabs ships with
+    `"res://Scripts/Grid.gd"="..."`), so we strip quotes before matching.
     """
     targets: set[str] = set()
     for section_name in ("script_extend", "script_overrides"):
         for key in sections.get(section_name, {}):
-            vanilla_path = key.strip()
+            vanilla_path = _strip_quotes(key)
             if vanilla_path.startswith("res://Scripts/") and vanilla_path.endswith(".gd"):
                 base = vanilla_path[len("res://Scripts/"):-len(".gd")]
                 if base:
