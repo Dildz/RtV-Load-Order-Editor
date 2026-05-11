@@ -49,10 +49,14 @@ NONGAMEPLAY_SUFFIXES = (
 LIFECYCLE_DESCRIPTIONS = {
     "_ready": "startup code (runs when the character spawns)",
     "_init": "object creation",
+    "_enter_tree": "node-entering-scene-tree code",
+    "_exit_tree": "node-leaving-scene-tree code",
     "_process": "per-frame update logic",
     "_physics_process": "per-frame physics update",
     "_input": "input handling",
     "_unhandled_input": "input handling",
+    "_unhandled_key_input": "input handling",
+    "_notification": "Godot engine notification handler",
 }
 
 
@@ -77,7 +81,9 @@ def _consequence(mod_display_name: str, severity: str) -> str:
 
 
 def _severity(func_name: str, total_overrides: int) -> str:
-    if func_name in ("_ready", "_init"):
+    # _ready / _init / _enter_tree all run at object/scene setup. Losing them
+    # in a chain conflict effectively kills the mod's wiring.
+    if func_name in ("_ready", "_init", "_enter_tree"):
         return "init"
     if total_overrides <= 1:
         return "only_feature"
@@ -133,6 +139,46 @@ def _build_constraints(
     total_funcs = {
         m.cfg_key: sum(len(ovr.functions) for ovr in m.overrides) for m in mods
     }
+
+    # ── Per-archive packaging issues ──────────────────────────────────
+    for m in mods:
+        if m.mod_txt_nested:
+            warnings.append(
+                f'"{m.display_name}" ({m.filename}) has its mod.txt nested '
+                f'inside a wrapper folder instead of at the archive root. '
+                f'Metro Mod Loader rejects this layout — repack the archive '
+                f'with mod.txt at the top level.'
+            )
+        if m.ships_database_gd:
+            warnings.append(
+                f'"{m.display_name}" ({m.filename}) ships its own '
+                f'res://Scripts/Database.gd. The first such mod wins; any other '
+                f'mod with the same file silently loses, and hardcoded preload() '
+                f'paths inside it may break if companion mods aren\'t loaded. '
+                f'Modern mods should use the [registry] API instead.'
+            )
+
+    # ── Duplicate display names ───────────────────────────────────────
+    # Same display name but different mod_ids/files is usually a fork or
+    # accidental dual install. Same-id duplicates are already covered by
+    # the "Duplicate mod id" warning below — skip those.
+    by_display: dict[str, list[ModInfo]] = defaultdict(list)
+    for m in mods:
+        by_display[m.display_name.lower()].append(m)
+    for group in by_display.values():
+        if len(group) < 2:
+            continue
+        ids = {m.mod_id for m in group}
+        # If every mod in the group has the same non-None id, the duplicate
+        # mod_id warning below covers it — don't double-warn.
+        if len(ids) == 1 and None not in ids:
+            continue
+        listed = ", ".join(f'"{m.filename}"' for m in group)
+        warnings.append(
+            f'{len(group)} mods share the display name "{group[0].display_name}": '
+            f'{listed}. Likely a fork or accidental dual install — Metro Mod '
+            f'Loader will warn about this too.'
+        )
 
     # ── Duplicate mod IDs ──────────────────────────────────────────────
     # Metro Mod Loader silently drops duplicates; the user must disable one.

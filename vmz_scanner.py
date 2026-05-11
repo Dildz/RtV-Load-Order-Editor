@@ -87,6 +87,13 @@ class ModInfo:
     parse_errors: list[str] = field(default_factory=list)
     class_names: list[str] = field(default_factory=list)           # `class_name X` declarations
     takeover_targets: set[str] = field(default_factory=set)        # base script names (e.g. "Character") this mod replaces
+    # True if the mod.txt was found but not at the archive root (e.g. inside
+    # a wrapper folder). MML rejects this layout as bad packaging.
+    mod_txt_nested: bool = False
+    # True if the archive ships its own res://Scripts/Database.gd. MML logs
+    # this as a "DATABASE COPY" warning because the private copy can break
+    # hardcoded preload() chains if companion mods aren't loaded too.
+    ships_database_gd: bool = False
 
     @property
     def cfg_key(self) -> str:
@@ -280,6 +287,9 @@ def scan_archive(path: Path) -> ModInfo:
             # mod.txt — find it anywhere in the archive (usually at root or one level deep)
             mod_txt_name = next((n for n in names if n.lower().endswith("mod.txt")), None)
             if mod_txt_name:
+                # MML requires mod.txt at the archive root; anything nested
+                # (e.g. "SubFolder/mod.txt") is treated as bad packaging.
+                info.mod_txt_nested = "/" in mod_txt_name or "\\" in mod_txt_name
                 try:
                     text = zf.read(mod_txt_name).decode("utf-8", errors="replace")
                     sections = _parse_mod_txt(text)
@@ -318,7 +328,12 @@ def scan_archive(path: Path) -> ModInfo:
                 # mod.txt is per-mod metadata, not a conflict surface
                 if n.lower().endswith("mod.txt"):
                     continue
-                info.file_paths.append(_archive_to_res_path(n))
+                res_path = _archive_to_res_path(n)
+                info.file_paths.append(res_path)
+                # Mods bundling their own res://Scripts/Database.gd shadow the
+                # vanilla one — MML flags this as a "DATABASE COPY" warning.
+                if res_path.lower() == "res://scripts/database.gd":
+                    info.ships_database_gd = True
 
             # .gd files — scan each for overrides + MCM refs + take_over_path + class_name
             literal_targets: set[str] = set()         # exact Scripts/X base names
