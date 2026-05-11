@@ -207,6 +207,28 @@ def _extract_updates_id(sections: dict[str, dict[str, str]]) -> str | None:
     return val.strip() if val and val.strip() else None
 
 
+def _extract_script_extend_targets(sections: dict[str, dict[str, str]]) -> set[str]:
+    """Return base script names declared in [script_extend] / [script_overrides].
+
+    These mod.txt sections declare full-script replacements via Godot's extends
+    chain — functionally equivalent to a literal take_over_path("res://Scripts/X.gd")
+    in source. Each entry has shape:
+        res://Scripts/Camera.gd = "res://MyMod/MyCamera.gd"
+    We only need the LEFT side (vanilla path being replaced) to extract the base
+    name so the analyzer's chain-conflict logic treats it like any other takeover.
+    `script_overrides` is the legacy alias for `script_extend`; both are accepted.
+    """
+    targets: set[str] = set()
+    for section_name in ("script_extend", "script_overrides"):
+        for key in sections.get(section_name, {}):
+            vanilla_path = key.strip()
+            if vanilla_path.startswith("res://Scripts/") and vanilla_path.endswith(".gd"):
+                base = vanilla_path[len("res://Scripts/"):-len(".gd")]
+                if base:
+                    targets.add(base)
+    return targets
+
+
 def _extract_autoloads(
     sections: dict[str, dict[str, str]],
 ) -> tuple[dict[str, str], list[str]]:
@@ -239,6 +261,9 @@ def _archive_to_res_path(name: str) -> str:
 def scan_archive(path: Path) -> ModInfo:
     """Open one .vmz/.zip and extract mod metadata + script overrides."""
     info = ModInfo(filename=path.name, display_name=path.name, declared_priority=None)
+    # Base script names declared in mod.txt [script_extend] / [script_overrides].
+    # Treated as takeover targets when building info.takeover_targets below.
+    cfg_script_extend_targets: set[str] = set()
 
     try:
         with zipfile.ZipFile(path, "r") as zf:
@@ -258,6 +283,7 @@ def scan_archive(path: Path) -> ModInfo:
                     info.mod_version = version
                     info.autoloads, info.restart_autoloads = _extract_autoloads(sections)
                     info.modworkshop_id = _extract_updates_id(sections)
+                    cfg_script_extend_targets = _extract_script_extend_targets(sections)
                 except Exception as e:
                     info.parse_errors.append(f"mod.txt: {e}")
             else:
@@ -307,13 +333,15 @@ def scan_archive(path: Path) -> ModInfo:
 
             # Build the exact set of base scripts this mod takes over:
             #   - Literal "res://Scripts/X.gd" args → X is pinpoint-targeted.
+            #   - mod.txt [script_extend] / [script_overrides] entries → same as
+            #     a literal take_over_path on the declared vanilla path.
             #   - Any script-targeted take_over_path with a dynamic arg →
             #     can't pinpoint; assume every base this mod extends is a
             #     target (matches the common Main.gd bootstrap idiom that
             #     iterates over the mod's extending scripts).
             # Non-script take_over_path calls (e.g. icon.take_over_path on a
             # texture path) no longer false-positive.
-            info.takeover_targets = set(literal_targets)
+            info.takeover_targets = set(literal_targets) | cfg_script_extend_targets
             if script_takeover_detected:
                 info.takeover_targets.update(ovr.base_script for ovr in info.overrides)
             for ovr in info.overrides:
