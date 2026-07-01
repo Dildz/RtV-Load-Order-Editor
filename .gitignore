@@ -1,8 +1,10 @@
 __pycache__
 .claude
 test_data/
+reference-repos/
 
 # Other
 api-1.yaml
 CLAUDE.md
 modworkshop_api.md
+OVERHAUL.md
