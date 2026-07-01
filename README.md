@@ -1,7 +1,8 @@
 # RtV Load Order Editor
 
-Standalone Python app that scans your installed Road to Vostok mods and writes
-an optimal load order into the Mod Configuration Menu config file.
+Standalone Python app that scans your installed Road to Vostok mods, detects
+load-order conflicts, and writes an optimal order into Metro Mod Loader's
+`mod_config.cfg`.
 
 Must have [Metro Mod Loader](https://modworkshop.net/mod/55623) installed.
 [Mod Configuration Menu](https://modworkshop.net/mod/53713) recommended.
@@ -51,14 +52,17 @@ are dropped automatically on load. Click Save to persist the cleaned cfg.
 
 1. **Scan** — opens each `.vmz`/`.zip` in the mods folder and extracts:
    - `mod.txt` metadata: `name`, `id`, `version`, `priority`, `[autoload]`
-     entries (including `!`-prefix restart-pass autoloads), and
-     `[updates]`/`modworkshop=<id>` if present
+     entries, and `[updates]`/`modworkshop=<id>` if present. The opt-in
+     sections `[registry]`, `[hooks]`, and `[script_extend]` are detected too
    - Every `.gd` script's `extends "res://Scripts/X.gd"` base, `class_name`
      declaration, and per-function `super()` usage
    - `take_over_path()` targets — resolved three ways: literal string args,
      `parent.resource_path` patterns, and script-named callees (fallback).
      Only scripts that actually call `take_over_path` are flagged, not every
      `.gd` in a mod that happens to contain one somewhere
+   - RTVModLib **hook** registrations (`.hook("stem-method", …)`) and
+     **registry** writes (`lib.register`/`override`/`patch` on
+     `lib.Registry.<KIND>`, plus the `register_weapon`/etc. aggregators)
    - Any reference to `res://ModConfigurationMenu/` (soft dependency on MCM)
    - The full list of files shipped by each archive (for path-collision
      detection)
@@ -72,12 +76,22 @@ are dropped automatically on load. Click Save to persist the cleaned cfg.
      must load AFTER the takeover. Multiple mods taking over the same base
      are **not** a hard conflict — they chain through inheritance in load
      order; this is surfaced as an informational note, not a warning
-   - **`class_name` collisions**: two mods declaring the same `class_name X`
-     is a hard conflict (Godot refuses to load the project). The losing mod
-     is suggested for disable
+   - **`class_name` conflicts**: two mods declaring the same `class_name X`,
+     or a mod declaring one the base game already uses, is a hard conflict
+     (Godot refuses to load the project). A mod that `take_over_path`s a
+     vanilla `class_name` script is flagged as a crash risk (Godot bug #83542)
+   - **Replace-hook collisions**: two mods registering the same bare hook
+     (no `-pre`/`-post`/`-callback` suffix) — only the first to load wins,
+     the rest are silently rejected. `-pre`/`-post` hooks compose and are left
+     alone
+   - **Registry conflicts**: two mods `register`/`override`ing the same
+     `(registry, id)` — or the same AI zone — and two mods `patch`ing the
+     **same field** of the same entry (xEdit-style; different fields compose).
+     Also warns when registry calls need a `[registry]` opt-in that's missing
    - **MCM soft dependency**: mods referencing MCM must load after MCM
    - Also detects: duplicate mod IDs, duplicate autoload names, shared file
-     paths across archives (higher-priority archive wins at mount)
+     paths across archives (higher-priority archive wins at mount), and
+     archives that fail to scan (corrupt zip / unreadable `mod.txt`)
 3. **Recommend** — topologically sorts the graph and assigns priority values
    in steps of 5 to mods without a declared priority. Mods that declare
    `priority=N` in their `mod.txt` are locked at that value.
@@ -121,8 +135,6 @@ overrides of removed/renamed engine scripts may slip through.
 | `rtv_editor/analyzer.py` | Conflict graph + topological sort |
 | `rtv_editor/mod_patcher.py` | Extract ModWorkshop ID + rewrite `.vmz` with patched `mod.txt` |
 | `rtv_editor/config_io.py` | `mod_config.cfg` read/write + rolling backups |
-| `tools/_validate.py` | Standalone CLI dump of scan + analyze results |
-| `tools/test_hooks.py` | Self-check for replace-hook collision detection |
 | `assets/RtV_LoE.ico` | App/exe icon (used by the PyInstaller build) |
 | `app_settings.json` | Auto-created on first run (in AppData) |
 
