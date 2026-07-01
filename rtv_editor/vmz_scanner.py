@@ -48,6 +48,29 @@ HOOK_CALL_RE = re.compile(r'\.hook\s*\(\s*["\']([^"\']+)["\']')
 # if a real mod trips it.
 HOOK_MANY_RE = re.compile(r'\.hook_many\s*\(\s*\{(.*?)\}', re.DOTALL)
 HOOK_MANY_KEY_RE = re.compile(r'["\']([^"\']+)["\']\s*:')
+# Registry API writes (vostok-mod-loader). Anchored on a `Registry.<CONST>`
+# first arg so ordinary Array.append()/.register-on-signal calls don't
+# false-positive. Captures verb, registry constant, and the string id (2nd arg).
+#   lib.register(lib.Registry.ITEMS, "Potato", data)
+REGISTRY_WRITE_RE = re.compile(
+    r'\.(register|override|patch|append|prepend|remove_from)\s*\(\s*'
+    r'(?:\w+\.)?Registry\.([A-Z_]+)\s*,\s*'
+    r'(?:"([^"]+)"|\'([^\']+)\')'
+)
+# Aggregator helpers take a {id: {...}} dict; each top-level key is a new id.
+REGISTRY_AGG_RE = re.compile(
+    r'\.(register_weapon|register_magazine|register_attachment'
+    r'|register_item|register_furniture)\s*\('
+)
+REGISTRY_AGG_KEY_RE = re.compile(r'["\'](\w+)["\']\s*:\s*\{')
+REGISTRY_AGG_MAP = {
+    "register_weapon": "WEAPONS", "register_magazine": "MAGAZINES",
+    "register_attachment": "ATTACHMENTS", "register_item": "ITEMS",
+    "register_furniture": "ITEMS",
+}
+# AI_TYPES conflicts are keyed by the `zone` field inside the data dict, not
+# the handle id — two mods claiming the same zone conflict even with different ids.
+REGISTRY_ZONE_RE = re.compile(r'["\']zone["\']\s*:\s*["\']([^"\']+)["\']')
 SECTION_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$')
 KV_RE = re.compile(r'^\s*([^=\s]+)\s*=\s*(.*)$')
 # VostokMods naming convention: a filename like "100-MyMod.vmz" implies a
@@ -84,6 +107,14 @@ class ScriptOverride:
 
 
 @dataclass
+class RegistryWrite:
+    """One vostok-mod-loader registry mutation found in a mod's source."""
+    verb: str       # register / override / patch / append / prepend / remove_from
+    registry: str   # constant name, e.g. "ITEMS", "AI_TYPES", "WEAPONS"
+    key: str        # conflict key: the entry id, or "zone:<zone>" for AI_TYPES
+
+
+@dataclass
 class ModInfo:
     filename: str                  # e.g. "HoldBreath.vmz"
     display_name: str              # from mod.txt name=, fallback to filename
@@ -110,6 +141,11 @@ class ModInfo:
     # lowercased. Bare names (no -pre/-post/-callback suffix) are replace hooks;
     # the analyzer flags two mods claiming the same one.
     hook_names: set[str] = field(default_factory=set)
+    # True if mod.txt has a [registry] section (the loader only injects the
+    # registry machinery when it sees this opt-in).
+    registry_optin: bool = False
+    # Registry API writes found in the mod's .gd source (register/override/etc.).
+    registry_writes: list[RegistryWrite] = field(default_factory=list)
 
     @property
     def cfg_key(self) -> str:
@@ -129,6 +165,25 @@ def _strip_quotes(s: str) -> str:
     if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
         return s[1:-1]
     return s
+
+
+def _call_arg_span(src: str, open_idx: int) -> str:
+    """Return the text between the parens of a call whose '(' is at open_idx.
+
+    Depth-counts parens to find the matching close. Doesn't account for parens
+    inside string literals (rare in registry calls) — best-effort, matches the
+    scanner's overall approach.
+    """
+    depth = 0
+    for i in range(open_idx, len(src)):
+        c = src[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx + 1:i]
+    return src[open_idx + 1:]
 
 
 def _split_function_bodies(source: str) -> list[tuple[str, str]]:
@@ -312,6 +367,7 @@ def scan_archive(path: Path) -> ModInfo:
                 try:
                     text = zf.read(mod_txt_name).decode("utf-8", errors="replace")
                     sections = _parse_mod_txt(text)
+                    info.registry_optin = "registry" in sections
                     name, pri, mod_id, version = _extract_mod_meta(sections)
                     if name:
                         info.display_name = name
@@ -359,6 +415,7 @@ def scan_archive(path: Path) -> ModInfo:
             script_takeover_detected = False          # any script-targeted take_over_path
             class_names: set[str] = set()
             hook_names: set[str] = set()               # RTVModLib hook registrations
+            registry_writes: list[RegistryWrite] = []  # registry API mutations
             for n in names:
                 if not n.lower().endswith(".gd"):
                     continue
@@ -385,11 +442,29 @@ def scan_archive(path: Path) -> ModInfo:
                     for hmm in HOOK_MANY_RE.finditer(src):
                         for hkey in HOOK_MANY_KEY_RE.finditer(hmm.group(1)):
                             hook_names.add(hkey.group(1).strip().lower())
+                    for rm in REGISTRY_WRITE_RE.finditer(src):
+                        verb, registry = rm.group(1), rm.group(2)
+                        key = rm.group(3) or rm.group(4)
+                        # AI_TYPES collides by zone (in the data dict), not id.
+                        if registry == "AI_TYPES" and verb in ("register", "override"):
+                            paren = src.find("(", rm.start())
+                            if paren != -1:
+                                zm = REGISTRY_ZONE_RE.search(_call_arg_span(src, paren))
+                                if zm:
+                                    key = f"zone:{zm.group(1)}"
+                        registry_writes.append(RegistryWrite(verb, registry, key))
+                    for am in REGISTRY_AGG_RE.finditer(src):
+                        reg = REGISTRY_AGG_MAP[am.group(1)]
+                        paren = src.find("(", am.start())
+                        if paren != -1:
+                            for km in REGISTRY_AGG_KEY_RE.finditer(_call_arg_span(src, paren)):
+                                registry_writes.append(RegistryWrite("register", reg, km.group(1)))
                 except Exception as e:
                     info.parse_errors.append(f"{n}: {e}")
 
             info.class_names = sorted(class_names)
             info.hook_names = hook_names
+            info.registry_writes = registry_writes
 
             # Build the exact set of base scripts this mod takes over:
             #   - Literal "res://Scripts/X.gd" args → X is pinpoint-targeted.

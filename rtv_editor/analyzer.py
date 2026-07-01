@@ -84,6 +84,22 @@ def _humanize_hook(name: str) -> str:
     return f"{stem[:1].upper()}{stem[1:]}.gd's {method}()"
 
 
+# Registries that BREAK without a [registry] opt-in section in mod.txt (explicit
+# failure, silent no-op, or degraded revert per vostok-mod-loader Registry docs).
+# The rest (items, loot, recipes, etc.) work regardless, so a missing opt-in
+# there isn't worth warning about.
+REGISTRY_NEEDS_OPTIN = frozenset({
+    "SCENES", "SCENE_PATHS", "AI_TYPES", "FISH_SPECIES", "SHELTERS", "RANDOM_SCENES",
+})
+
+
+def _humanize_registry(registry: str, key: str) -> str:
+    """Readable phrase for a (registry, key) pair. AI_TYPES keys are zones."""
+    if key.startswith("zone:"):
+        return f'the AI type for zone "{key[len("zone:"):]}"'
+    return f'the {registry.lower()} entry "{key}"'
+
+
 def _consequence(mod_display_name: str, severity: str) -> str:
     """One-line description of what happens to a mod when it 'loses' a conflict."""
     if severity == "init":
@@ -439,6 +455,50 @@ def _build_constraints(
             f'give it the lowest number. (The losing mods may still work if they '
             f'fall back to before/after hooks.)  [technical: replace hook "{hook}"]'
         )
+
+    # ── Registry id / zone collisions ──────────────────────────────────
+    # register/override on the same (registry, id) is single-owner in MML:
+    # register on a taken id fails, override on an already-overridden id fails —
+    # either way the second mod loses silently and its content never appears.
+    # AI_TYPES is keyed by zone. Additive verbs (append/prepend/remove_from)
+    # compose and are ignored here.
+    # ponytail: patch last-wins is not flagged — it's soft (only collides when
+    # two mods touch the SAME field) and needs field-level parsing; add if a
+    # real case wants it.
+    reg_owners: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for m in mods:
+        for w in m.registry_writes:
+            if w.verb in ("register", "override"):
+                reg_owners[(w.registry, w.key)].append(m.cfg_key)
+    for (registry, key), owners in reg_owners.items():
+        uniq = list(dict.fromkeys(owners))
+        if len(uniq) < 2:
+            continue
+        listed = ", ".join(f'"{name_for[o]}"' for o in uniq)
+        warnings.append(
+            f'{listed} both add or replace {_humanize_registry(registry, key)}. '
+            f'Metro Mod Loader lets only ONE registration win (the first to '
+            f'load); the others fail silently and their version never appears '
+            f'in-game.  [technical: registry {registry.lower()} "{key}"]'
+        )
+
+    # ── Registry writes without the [registry] opt-in ──────────────────
+    # Some registries (scenes, ai_types, shelters, …) need an (empty) [registry]
+    # section in mod.txt or the loader skips the machinery and the writes no-op.
+    for m in mods:
+        if m.registry_optin:
+            continue
+        needs = sorted({w.registry for w in m.registry_writes
+                        if w.registry in REGISTRY_NEEDS_OPTIN})
+        if needs:
+            listed_reg = ", ".join(r.lower() for r in needs)
+            warnings.append(
+                f'"{m.display_name}" uses registry calls that require the '
+                f'[registry] opt-in ({listed_reg}) but its mod.txt has no '
+                f'[registry] section — Metro Mod Loader skips the setup, so those '
+                f'registrations silently do nothing in-game. The author needs to '
+                f'add an empty [registry] section.'
+            )
 
     # ── Mod Configuration Menu soft dependency ─────────────────────────
     # Mods that reference res://ModConfigurationMenu/... need MCM to load
