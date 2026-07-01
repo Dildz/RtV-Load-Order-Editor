@@ -69,6 +69,21 @@ def _humanize_function(base_script: str, func_name: str) -> str:
     return f"{base_script.lower()} {spaced.lower()}"
 
 
+# Hook-name suffixes that COMPOSE (multiple mods coexist). Anything without one
+# of these is a single-owner "replace" hook — see _build_constraints.
+HOOK_COMPOSE_SUFFIXES = ("-pre", "-post", "-callback")
+
+
+def _humanize_hook(name: str) -> str:
+    """'controller-jump' -> 'Controller.gd's jump()'. Hook names are
+    <scriptstem>-<method>; split on the first dash. Returns the raw name if it
+    doesn't look like one."""
+    stem, sep, method = name.partition("-")
+    if not sep or not method:
+        return f'"{name}"'
+    return f"{stem[:1].upper()}{stem[1:]}.gd's {method}()"
+
+
 def _consequence(mod_display_name: str, severity: str) -> str:
     """One-line description of what happens to a mod when it 'loses' a conflict."""
     if severity == "init":
@@ -398,6 +413,32 @@ def _build_constraints(
                 f'Any function that multiple of them override without super() is listed '
                 f'above as a separate conflict.'
             )
+
+    # ── Replace-hook collisions ────────────────────────────────────────
+    # RTVModLib "replace" hooks (bare name, no -pre/-post/-callback suffix) are
+    # single-owner: the FIRST mod to register wins and later mods are silently
+    # rejected (hook() returns -1). Registration happens during mod _ready,
+    # which runs in load order — so the LOWEST load order number wins, the
+    # inverse of script-override chains. Load order can't make both work; it
+    # only decides the winner (the loser may still fall back to -pre/-post
+    # hooks, so this is a warning, not a suggest-disable).
+    replace_owners: dict[str, list[str]] = defaultdict(list)
+    for m in mods:
+        for hook in m.hook_names:
+            if not hook.endswith(HOOK_COMPOSE_SUFFIXES):
+                replace_owners[hook].append(m.cfg_key)
+    for hook, owners in replace_owners.items():
+        uniq = list(dict.fromkeys(owners))
+        if len(uniq) < 2:
+            continue
+        listed = ", ".join(f'"{name_for[o]}"' for o in uniq)
+        warnings.append(
+            f'{listed} each REPLACE {_humanize_hook(hook)}. Only one can win — '
+            f'Metro Mod Loader keeps whichever loads FIRST (the LOWEST load order '
+            f'number) and silently ignores the others. If you care which one wins, '
+            f'give it the lowest number. (The losing mods may still work if they '
+            f'fall back to before/after hooks.)  [technical: replace hook "{hook}"]'
+        )
 
     # ── Mod Configuration Menu soft dependency ─────────────────────────
     # Mods that reference res://ModConfigurationMenu/... need MCM to load

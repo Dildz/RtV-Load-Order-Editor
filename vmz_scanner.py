@@ -36,6 +36,18 @@ TAKE_OVER_SCRIPT_CALLEE_RE = re.compile(
     r'\b\w*[Ss]cript\w*\s*\.\s*take_over_path\s*\('
 )
 MCM_REF_RE = re.compile(r'res://ModConfigurationMenu/')
+# RTVModLib hook registrations. A hook name is "<scriptstem>-<method>[-pre|-post|
+# -callback]". Bare names (no suffix) are single-owner REPLACE hooks — the first
+# mod to register wins, later mods are silently rejected. See vostok-mod-loader
+# src/hooks_api.gd. We capture the name string literal from any `.hook(` call:
+#   _lib.hook("controller-jump-pre", cb)     lib.hook("ai-death", cb, 50)
+HOOK_CALL_RE = re.compile(r'\.hook\s*\(\s*["\']([^"\']+)["\']')
+# Batched form: lib.hook_many({ "name": cb, ... }) — pull the quoted keys.
+# ponytail: dict body captured non-greedily to the first "}", so a callback that
+# is itself a dict literal would truncate it. Rare; upgrade to a brace counter
+# if a real mod trips it.
+HOOK_MANY_RE = re.compile(r'\.hook_many\s*\(\s*\{(.*?)\}', re.DOTALL)
+HOOK_MANY_KEY_RE = re.compile(r'["\']([^"\']+)["\']\s*:')
 SECTION_RE = re.compile(r'^\s*\[([^\]]+)\]\s*$')
 KV_RE = re.compile(r'^\s*([^=\s]+)\s*=\s*(.*)$')
 # VostokMods naming convention: a filename like "100-MyMod.vmz" implies a
@@ -94,6 +106,10 @@ class ModInfo:
     # this as a "DATABASE COPY" warning because the private copy can break
     # hardcoded preload() chains if companion mods aren't loaded too.
     ships_database_gd: bool = False
+    # RTVModLib hook names this mod registers via .hook()/.hook_many(),
+    # lowercased. Bare names (no -pre/-post/-callback suffix) are replace hooks;
+    # the analyzer flags two mods claiming the same one.
+    hook_names: set[str] = field(default_factory=set)
 
     @property
     def cfg_key(self) -> str:
@@ -342,6 +358,7 @@ def scan_archive(path: Path) -> ModInfo:
             literal_targets: set[str] = set()         # exact Scripts/X base names
             script_takeover_detected = False          # any script-targeted take_over_path
             class_names: set[str] = set()
+            hook_names: set[str] = set()               # RTVModLib hook registrations
             for n in names:
                 if not n.lower().endswith(".gd"):
                     continue
@@ -363,10 +380,16 @@ def scan_archive(path: Path) -> ModInfo:
                         script_takeover_detected = True
                     for cm in CLASS_NAME_RE.finditer(src):
                         class_names.add(cm.group(1))
+                    for hkm in HOOK_CALL_RE.finditer(src):
+                        hook_names.add(hkm.group(1).strip().lower())
+                    for hmm in HOOK_MANY_RE.finditer(src):
+                        for hkey in HOOK_MANY_KEY_RE.finditer(hmm.group(1)):
+                            hook_names.add(hkey.group(1).strip().lower())
                 except Exception as e:
                     info.parse_errors.append(f"{n}: {e}")
 
             info.class_names = sorted(class_names)
+            info.hook_names = hook_names
 
             # Build the exact set of base scripts this mod takes over:
             #   - Literal "res://Scripts/X.gd" args → X is pinpoint-targeted.
