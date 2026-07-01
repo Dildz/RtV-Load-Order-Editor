@@ -112,6 +112,7 @@ class RegistryWrite:
     verb: str       # register / override / patch / append / prepend / remove_from
     registry: str   # constant name, e.g. "ITEMS", "AI_TYPES", "WEAPONS"
     key: str        # conflict key: the entry id, or "zone:<zone>" for AI_TYPES
+    fields: frozenset[str] = frozenset()  # patch: top-level fields (empty if computed)
 
 
 @dataclass
@@ -167,23 +168,50 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
-def _call_arg_span(src: str, open_idx: int) -> str:
-    """Return the text between the parens of a call whose '(' is at open_idx.
+_BRACKET_CLOSE = {"(": ")", "{": "}", "[": "]"}
+# Top-level dict key: "name": or 'name': (a field name in a patch fields dict).
+_DICT_KEY_RE = re.compile(r'["\']([A-Za-z_]\w*)["\']\s*:')
+# Innermost {...} / [...] group — applied repeatedly to strip nesting so only
+# TOP-level keys of a dict remain (a nested field must not count as its own key).
+_NESTED_GROUP_RE = re.compile(r'\{[^{}]*\}|\[[^\[\]]*\]')
 
-    Depth-counts parens to find the matching close. Doesn't account for parens
-    inside string literals (rare in registry calls) — best-effort, matches the
-    scanner's overall approach.
+
+def _balanced_span(src: str, open_idx: int) -> str:
+    """Text inside the bracket pair whose opener is at open_idx (closer inferred
+    from the opening char). Counts only that pair's brackets — good enough for
+    registry calls; doesn't handle brackets inside string literals.
     """
+    open_c = src[open_idx]
+    close_c = _BRACKET_CLOSE[open_c]
     depth = 0
     for i in range(open_idx, len(src)):
         c = src[i]
-        if c == "(":
+        if c == open_c:
             depth += 1
-        elif c == ")":
+        elif c == close_c:
             depth -= 1
             if depth == 0:
                 return src[open_idx + 1:i]
     return src[open_idx + 1:]
+
+
+def _patch_fields(arg_span: str) -> frozenset[str]:
+    """Top-level field names from the fields dict of a `patch(reg, id, {...})`.
+
+    `arg_span` is the text between the call's parens. Returns an EMPTY set when
+    the fields argument isn't a literal dict (e.g. a variable) — the fields are
+    unknowable statically then, so the analyzer skips that patch rather than
+    guessing (xEdit-style: only flag proven same-field overlaps).
+    """
+    brace = arg_span.find("{")
+    if brace == -1:
+        return frozenset()
+    inner = _balanced_span(arg_span, brace)
+    prev = None
+    while inner != prev:  # collapse nested {..}/[..] so only top-level keys remain
+        prev = inner
+        inner = _NESTED_GROUP_RE.sub(" ", inner)
+    return frozenset(_DICT_KEY_RE.findall(inner))
 
 
 def _split_function_bodies(source: str) -> list[tuple[str, str]]:
@@ -445,19 +473,26 @@ def scan_archive(path: Path) -> ModInfo:
                     for rm in REGISTRY_WRITE_RE.finditer(src):
                         verb, registry = rm.group(1), rm.group(2)
                         key = rm.group(3) or rm.group(4)
+                        fields: frozenset[str] = frozenset()
                         # AI_TYPES collides by zone (in the data dict), not id.
                         if registry == "AI_TYPES" and verb in ("register", "override"):
                             paren = src.find("(", rm.start())
                             if paren != -1:
-                                zm = REGISTRY_ZONE_RE.search(_call_arg_span(src, paren))
+                                zm = REGISTRY_ZONE_RE.search(_balanced_span(src, paren))
                                 if zm:
                                     key = f"zone:{zm.group(1)}"
-                        registry_writes.append(RegistryWrite(verb, registry, key))
+                        elif verb == "patch":
+                            # Capture the patched fields for same-field conflict
+                            # detection (xEdit-style). Empty if a computed dict.
+                            paren = src.find("(", rm.start())
+                            if paren != -1:
+                                fields = _patch_fields(_balanced_span(src, paren))
+                        registry_writes.append(RegistryWrite(verb, registry, key, fields))
                     for am in REGISTRY_AGG_RE.finditer(src):
                         reg = REGISTRY_AGG_MAP[am.group(1)]
                         paren = src.find("(", am.start())
                         if paren != -1:
-                            for km in REGISTRY_AGG_KEY_RE.finditer(_call_arg_span(src, paren)):
+                            for km in REGISTRY_AGG_KEY_RE.finditer(_balanced_span(src, paren)):
                                 registry_writes.append(RegistryWrite("register", reg, km.group(1)))
                 except Exception as e:
                     info.parse_errors.append(f"{n}: {e}")

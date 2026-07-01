@@ -482,6 +482,40 @@ def _build_constraints(
             f'in-game.  [technical: registry {registry.lower()} "{key}"]'
         )
 
+    # ── Registry patch same-field collisions (xEdit-style) ─────────────
+    # Two mods PATCHing the same (registry, id) only conflict when they touch
+    # the SAME field — different fields compose cleanly (this is exactly xEdit's
+    # override-vs-conflict distinction). On a shared field the last (highest
+    # load order) writer wins and the other's value is silently overwritten.
+    # Only fields parsed from LITERAL dicts are known; patches built from a
+    # computed dict contribute no fields, so they're skipped rather than guessed.
+    patch_field_owners: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for m in mods:
+        for w in m.registry_writes:
+            if w.verb == "patch":
+                for fld in w.fields:
+                    patch_field_owners[(w.registry, w.key, fld)].append(m.cfg_key)
+    # Collapse per-field clashes back to one warning per (registry, id).
+    clash_by_entry: dict[tuple[str, str], tuple[set[str], set[str]]] = {}
+    for (registry, rid, fld), owners in patch_field_owners.items():
+        uniq = set(owners)
+        if len(uniq) < 2:
+            continue
+        mods_set, fields_set = clash_by_entry.setdefault((registry, rid), (set(), set()))
+        mods_set.update(uniq)
+        fields_set.add(fld)
+    for (registry, rid), (mods_set, fields_set) in clash_by_entry.items():
+        listed = ", ".join(f'"{name_for[o]}"' for o in sorted(mods_set))
+        flds = ", ".join(sorted(fields_set))
+        which = "those fields" if len(fields_set) > 1 else "that field"
+        warnings.append(
+            f'{listed} patch the same field(s) on {_humanize_registry(registry, rid)}: '
+            f'{flds}. Patches to different fields would coexist, but these overlap — '
+            f"so the highest load order number wins and the other mods' value for "
+            f'{which} is silently ignored.  '
+            f'[technical: patch {registry.lower()} "{rid}" fields: {flds}]'
+        )
+
     # ── Registry writes without the [registry] opt-in ──────────────────
     # Some registries (scenes, ai_types, shelters, …) need an (empty) [registry]
     # section in mod.txt or the loader skips the machinery and the writes no-op.
