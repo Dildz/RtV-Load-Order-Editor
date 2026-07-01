@@ -29,16 +29,12 @@ COLOR_TEXT_MUTED  = ("#888888", "#888888")
 COLOR_TEXT_DIM    = ("gray55", "gray45")
 COLOR_WARNING     = ("#b58900", "#e0a000")
 COLOR_LOCK        = ("#7a6500", "#c9a227")
-COLOR_PRIMARY     = "#2d8f47"  # green for save
+COLOR_PRIMARY     = "#2d8f47"  # green for commit/confirm actions (save, rename, update)
 COLOR_PRIMARY_HV  = "#3aa055"
 COLOR_ACCENT      = "#1f6feb"  # blue for analyze
 COLOR_ACCENT_HV   = "#2d7df0"
-COLOR_NEUTRAL     = "#3a3a3a"  # grey for refresh
+COLOR_NEUTRAL     = "#3a3a3a"  # grey for secondary/utility buttons
 COLOR_NEUTRAL_HV  = "#4a4a4a"
-COLOR_TEAL        = "#0d9488"  # teal for rename .zip → .vmz
-COLOR_TEAL_HV     = "#14b8a6"
-COLOR_PURPLE      = "#7c3aed"  # purple for missing updates
-COLOR_PURPLE_HV   = "#8b4dff"
 COLOR_DUPE        = "#c94040"  # red — duplicate priority warning
 COLOR_DRAG        = "#1f6feb"  # blue border — row being dragged
 COLOR_DROP        = "#2d8f47"  # green border — drag drop target
@@ -571,7 +567,7 @@ class RenameZipsDialog(ctk.CTkToplevel):
         ctk.CTkButton(
             footer, text="Rename", width=130, height=34,
             corner_radius=8, font=FONT_BODY,
-            fg_color=COLOR_TEAL, hover_color=COLOR_TEAL_HV,
+            fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_HV,
             command=self._on_rename,
         ).pack(side="right")
 
@@ -751,7 +747,7 @@ class App(ctk.CTk):
         self.rename_btn = ctk.CTkButton(
             button_block, text="Rename .zip → .vmz", width=140, height=34,
             corner_radius=8, font=FONT_BODY,
-            fg_color=COLOR_TEAL, hover_color=COLOR_TEAL_HV,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
             command=self._on_rename_zips,
         )
         self.rename_btn.pack(side="left", padx=4)
@@ -759,7 +755,7 @@ class App(ctk.CTk):
         self.missing_updates_btn = ctk.CTkButton(
             button_block, text="Missing Update Links", width=150, height=34,
             corner_radius=8, font=FONT_BODY,
-            fg_color=COLOR_PURPLE, hover_color=COLOR_PURPLE_HV,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
             command=self._on_missing_updates,
         )
         self.missing_updates_btn.pack(side="left", padx=4)
