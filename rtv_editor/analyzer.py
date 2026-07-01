@@ -218,6 +218,14 @@ def _build_constraints(
 
     # ── Per-archive packaging issues ──────────────────────────────────
     for m in mods:
+        if m.parse_errors:
+            details = "; ".join(m.parse_errors)
+            warnings.append(
+                f'"{m.display_name}" could not be fully scanned: {details}. Its '
+                f'metadata and overrides may be missing from this analysis — the '
+                f'archive may be corrupt or its mod.txt unreadable. Re-download or '
+                f'repack it (a bad .zip often needs re-packing with 7-Zip).'
+            )
         if m.mod_txt_nested:
             warnings.append(
                 f'"{m.display_name}" ({m.filename}) has its mod.txt nested '
