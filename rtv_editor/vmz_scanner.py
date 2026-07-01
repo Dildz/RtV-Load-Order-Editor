@@ -131,6 +131,7 @@ class ModInfo:
     parse_errors: list[str] = field(default_factory=list)
     class_names: list[str] = field(default_factory=list)           # `class_name X` declarations
     takeover_targets: set[str] = field(default_factory=set)        # base script names (e.g. "Character") this mod replaces
+    source_takeover_targets: set[str] = field(default_factory=set)  # take_over_path in SOURCE only (excl. [script_extend]) — risks #83542 on class_name scripts
     # True if the mod.txt was found but not at the archive root (e.g. inside
     # a wrapper folder). MML rejects this layout as bad packaging.
     mod_txt_nested: bool = False
@@ -511,9 +512,15 @@ def scan_archive(path: Path) -> ModInfo:
             #     iterates over the mod's extending scripts).
             # Non-script take_over_path calls (e.g. icon.take_over_path on a
             # texture path) no longer false-positive.
-            info.takeover_targets = set(literal_targets) | cfg_script_extend_targets
+            # Source-level take_over_path (literal + dynamic) is tracked
+            # separately from [script_extend]: only the SOURCE form risks the
+            # #83542 class_name crash — [script_extend] goes through the loader's
+            # safe rewrite path.
+            source_takeover = set(literal_targets)
             if script_takeover_detected:
-                info.takeover_targets.update(ovr.base_script for ovr in info.overrides)
+                source_takeover.update(ovr.base_script for ovr in info.overrides)
+            info.source_takeover_targets = source_takeover
+            info.takeover_targets = source_takeover | cfg_script_extend_targets
             for ovr in info.overrides:
                 ovr.takes_over_base = ovr.base_script in info.takeover_targets
     except zipfile.BadZipFile:

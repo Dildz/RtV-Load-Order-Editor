@@ -100,6 +100,51 @@ def _humanize_registry(registry: str, key: str) -> str:
     return f'the {registry.lower()} entry "{key}"'
 
 
+# Vanilla Road to Vostok class_name scripts, mirrored from Metro Mod Loader's
+# hardcoded fallback map (vostok-mod-loader/src/pck_enumeration.gd:33). Used to
+# flag two crash-level mistakes: a mod re-declaring one of these class_names
+# (fatal boot error), and take_over_path on one of these scripts (Godot bug
+# #83542 — class cache corruption / crash). Note class name != file stem for a
+# few (Flash->MuzzleFlash, Knife->KnifeRig).
+_VANILLA_CLASS_MAP = {
+    "AIWeaponData": "res://Scripts/AIWeaponData.gd", "Area": "res://Scripts/Area.gd",
+    "AttachmentData": "res://Scripts/AttachmentData.gd", "AudioEvent": "res://Scripts/AudioEvent.gd",
+    "AudioLibrary": "res://Scripts/AudioLibrary.gd", "Camera": "res://Scripts/Camera.gd",
+    "CasetteData": "res://Scripts/CasetteData.gd", "CatData": "res://Scripts/CatData.gd",
+    "CharacterSave": "res://Scripts/CharacterSave.gd", "ContainerSave": "res://Scripts/ContainerSave.gd",
+    "Controller": "res://Scripts/Controller.gd", "Door": "res://Scripts/Door.gd",
+    "EventData": "res://Scripts/EventData.gd", "Events": "res://Scripts/Events.gd",
+    "Fish": "res://Scripts/Fish.gd", "FishingData": "res://Scripts/FishingData.gd",
+    "Flash": "res://Scripts/MuzzleFlash.gd", "Furniture": "res://Scripts/Furniture.gd",
+    "FurnitureSave": "res://Scripts/FurnitureSave.gd", "GameData": "res://Scripts/GameData.gd",
+    "Grenade": "res://Scripts/Grenade.gd", "GrenadeData": "res://Scripts/GrenadeData.gd",
+    "Grid": "res://Scripts/Grid.gd", "Hitbox": "res://Scripts/Hitbox.gd",
+    "Inspect": "res://Scripts/Inspect.gd", "InstrumentData": "res://Scripts/InstrumentData.gd",
+    "Item": "res://Scripts/Item.gd", "ItemData": "res://Scripts/ItemData.gd",
+    "ItemSave": "res://Scripts/ItemSave.gd", "Knife": "res://Scripts/KnifeRig.gd",
+    "KnifeData": "res://Scripts/KnifeData.gd", "LootContainer": "res://Scripts/LootContainer.gd",
+    "LootTable": "res://Scripts/LootTable.gd", "Lure": "res://Scripts/Lure.gd",
+    "Mine": "res://Scripts/Mine.gd", "Pickup": "res://Scripts/Pickup.gd",
+    "Preferences": "res://Scripts/Preferences.gd", "RecipeData": "res://Scripts/RecipeData.gd",
+    "Recipes": "res://Scripts/Recipes.gd", "Settings": "res://Scripts/Settings.gd",
+    "ShelterSave": "res://Scripts/ShelterSave.gd", "Slot": "res://Scripts/Slot.gd",
+    "SlotData": "res://Scripts/SlotData.gd", "SpawnerChunkData": "res://Scripts/SpawnerChunkData.gd",
+    "SpawnerData": "res://Scripts/SpawnerData.gd", "SpawnerSceneData": "res://Scripts/SpawnerSceneData.gd",
+    "SpineData": "res://Scripts/SpineData.gd", "Surface": "res://Scripts/Surface.gd",
+    "SwitchSave": "res://Scripts/SwitchSave.gd", "TaskData": "res://Scripts/TaskData.gd",
+    "TrackData": "res://Scripts/TrackData.gd", "Trader": "res://Scripts/Trader.gd",
+    "TraderData": "res://Scripts/TraderData.gd", "TraderSave": "res://Scripts/TraderSave.gd",
+    "Validator": "res://Scripts/Validator.gd", "WeaponData": "res://Scripts/WeaponData.gd",
+    "WeaponRig": "res://Scripts/WeaponRig.gd", "WorldSave": "res://Scripts/WorldSave.gd",
+}
+VANILLA_CLASS_NAMES = frozenset(_VANILLA_CLASS_MAP)
+# Script stems (file basename without .gd) of the vanilla class_name scripts —
+# matches the base names the scanner records in source_takeover_targets.
+VANILLA_CLASSNAME_STEMS = frozenset(
+    p.rsplit("/", 1)[-1][:-len(".gd")] for p in _VANILLA_CLASS_MAP.values()
+)
+
+
 def _consequence(mod_display_name: str, severity: str) -> str:
     """One-line description of what happens to a mod when it 'loses' a conflict."""
     if severity == "init":
@@ -250,6 +295,38 @@ def _build_constraints(
                 f'disable {disable_names}.'
             )
             suggest_disable.extend(losers)
+
+    # ── class_name collision with vanilla (fatal boot error) ───────────
+    # A mod declaring a class_name the base game already uses triggers Godot's
+    # "Class X hides a global script class" fatal error — the game won't start.
+    for m in mods:
+        clash = sorted(set(m.class_names) & VANILLA_CLASS_NAMES)
+        if clash:
+            listed = ", ".join(f"`{c}`" for c in clash)
+            warnings.append(
+                f'"{m.display_name}" declares class_name {listed}, which Road to '
+                f'Vostok already uses. Godot refuses to boot when a mod class_name '
+                f'collides with a vanilla one ("Class hides a global script class") '
+                f'— the game will not start with this mod enabled. The author must '
+                f'rename the class.'
+            )
+
+    # ── take_over_path on a vanilla class_name script (#83542 crash) ───
+    # Directly calling take_over_path on a class_name script corrupts Godot's
+    # class cache (engine bug #83542) and can crash the game. [script_extend]
+    # is safe (the loader rewrites it) — only source-level take_over_path risks
+    # this, which is why we check source_takeover_targets, not takeover_targets.
+    for m in mods:
+        risky = sorted(m.source_takeover_targets & VANILLA_CLASSNAME_STEMS)
+        if risky:
+            listed = ", ".join(f"{s}.gd" for s in risky)
+            warnings.append(
+                f'"{m.display_name}" calls take_over_path on vanilla class_name '
+                f'script(s): {listed}. This corrupts Godot\'s class cache (engine '
+                f'bug #83542) and can crash the game. The mod should use the '
+                f'loader\'s [script_extend] declaration or hooks instead of a '
+                f'direct take_over_path on these scripts.'
+            )
 
     # ── Duplicate autoload names ───────────────────────────────────────
     # If two mods declare the same [autoload] entry (e.g. Main=... or Config=...),
