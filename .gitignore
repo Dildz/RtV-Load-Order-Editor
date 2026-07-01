@@ -10,5 +10,5 @@ docs/OVERHAUL.md
 CLAUDE.md
 
 # Dev-only maintenance scripts (kept local, not committed)
-tools/_fetch_latest.py
-tools/_fetch_popular.py
+tools/
+
