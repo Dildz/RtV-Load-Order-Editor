@@ -321,11 +321,13 @@ def _build_constraints(
         if risky:
             listed = ", ".join(f"{s}.gd" for s in risky)
             warnings.append(
-                f'"{m.display_name}" calls take_over_path on vanilla class_name '
-                f'script(s): {listed}. This corrupts Godot\'s class cache (engine '
-                f'bug #83542) and can crash the game. The mod should use the '
-                f'loader\'s [script_extend] declaration or hooks instead of a '
-                f'direct take_over_path on these scripts.'
+                f'"{m.display_name}" uses a risky pattern — take_over_path on '
+                f'vanilla class_name script(s): {listed}. This is usually fine on '
+                f'its own, but it can corrupt Godot\'s class cache (engine bug '
+                f'#83542) and crash when another mod also takes over the same '
+                f"script. It's safer for the author to use the loader's "
+                f'[script_extend] declaration or hooks instead.  '
+                f'[technical: #83542 take_over_path on class_name script]'
             )
 
     # ── Duplicate autoload names ───────────────────────────────────────
