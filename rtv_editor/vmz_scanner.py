@@ -123,7 +123,6 @@ class ModInfo:
     mod_id: str | None = None
     mod_version: str | None = None  # from mod.txt [mod] version=
     autoloads: dict[str, str] = field(default_factory=dict)   # name -> res:// path
-    restart_autoloads: list[str] = field(default_factory=list)  # autoload names with '!' prefix
     file_paths: list[str] = field(default_factory=list)        # res:// paths shipped by archive
     uses_mcm: bool = False          # references res://ModConfigurationMenu/ in any script
     modworkshop_id: str | None = None  # from [updates] modworkshop=<id>, None if section/key absent
@@ -347,24 +346,14 @@ def _extract_script_extend_targets(sections: dict[str, dict[str, str]]) -> set[s
     return targets
 
 
-def _extract_autoloads(
-    sections: dict[str, dict[str, str]],
-) -> tuple[dict[str, str], list[str]]:
-    """Return (autoloads, restart_autoloads).
+def _extract_autoloads(sections: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Return the autoload name -> res:// path map.
 
-    Metro Mod Loader supports a '!' prefix on autoload names to request a
-    pre-game-autoload restart pass. We strip the prefix in the returned dict
-    and record the original names separately so callers can warn about it.
+    Metro Mod Loader allows a '!' prefix on an autoload name to request a
+    pre-game-autoload restart pass; we strip it so names are clean.
     """
-    raw = sections.get("autoload", {})
-    autoloads: dict[str, str] = {}
-    restart: list[str] = []
-    for name, path in raw.items():
-        clean = name.lstrip("!")
-        if clean != name:
-            restart.append(clean)
-        autoloads[clean] = path
-    return autoloads, restart
+    return {name.lstrip("!"): path
+            for name, path in sections.get("autoload", {}).items()}
 
 
 def _archive_to_res_path(name: str) -> str:
@@ -403,7 +392,7 @@ def scan_archive(path: Path) -> ModInfo:
                     info.declared_priority = pri
                     info.mod_id = mod_id
                     info.mod_version = version
-                    info.autoloads, info.restart_autoloads = _extract_autoloads(sections)
+                    info.autoloads = _extract_autoloads(sections)
                     info.modworkshop_id = _extract_updates_id(sections)
                     cfg_script_extend_targets = _extract_script_extend_targets(sections)
                 except Exception as e:
