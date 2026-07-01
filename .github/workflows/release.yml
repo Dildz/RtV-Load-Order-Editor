@@ -33,7 +33,7 @@ jobs:
 
       - name: Build exe with PyInstaller
         run: |
-          pyinstaller --noconfirm --onefile --windowed --name "RtV_LoadOrder_Editor" --icon RtV_LoE.ico --collect-all customtkinter main.py
+          pyinstaller --noconfirm --onefile --windowed --name "RtV_LoadOrder_Editor" --icon assets/RtV_LoE.ico --collect-all customtkinter main.py
 
       - name: Generate SHA256 hash
         run: |

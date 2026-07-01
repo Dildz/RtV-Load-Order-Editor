@@ -1,9 +1,14 @@
 """Phase 1 self-check: replace-hook collision detection.
 
-Run: python test_hooks.py   (no framework — plain asserts)
+Run: python tools/test_hooks.py   (no framework — plain asserts)
 """
-from analyzer import analyze
-from vmz_scanner import ModInfo
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from rtv_editor.analyzer import analyze
+from rtv_editor.vmz_scanner import ModInfo
 
 
 def _mod(name: str, hooks: list[str]) -> ModInfo:

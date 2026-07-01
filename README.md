@@ -115,14 +115,16 @@ overrides of removed/renamed engine scripts may slip through.
 | File | Purpose |
 |------|---------|
 | `main.py` | Entry point |
-| `gui.py` | customtkinter window |
-| `paths.py` | Settings, AppData paths, mods-folder dialog |
-| `vmz_scanner.py` | Read archives + parse `.gd` overrides |
-| `analyzer.py` | Conflict graph + topological sort |
-| `mod_patcher.py` | Extract ModWorkshop ID + rewrite `.vmz` with patched `mod.txt` |
-| `config_io.py` | `mod_config.cfg` read/write + rolling backups |
-| `_validate.py` | Standalone CLI dump of scan + analyze results |
-| `app_settings.json` | Auto-created on first run |
+| `rtv_editor/gui.py` | customtkinter window |
+| `rtv_editor/paths.py` | Settings, AppData paths, mods-folder dialog |
+| `rtv_editor/vmz_scanner.py` | Read archives + parse `.gd` overrides |
+| `rtv_editor/analyzer.py` | Conflict graph + topological sort |
+| `rtv_editor/mod_patcher.py` | Extract ModWorkshop ID + rewrite `.vmz` with patched `mod.txt` |
+| `rtv_editor/config_io.py` | `mod_config.cfg` read/write + rolling backups |
+| `tools/_validate.py` | Standalone CLI dump of scan + analyze results |
+| `tools/test_hooks.py` | Self-check for replace-hook collision detection |
+| `assets/RtV_LoE.ico` | App/exe icon (used by the PyInstaller build) |
+| `app_settings.json` | Auto-created on first run (in AppData) |
 
 ## Build
 

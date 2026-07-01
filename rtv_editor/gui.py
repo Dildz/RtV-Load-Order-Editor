@@ -9,12 +9,12 @@ from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
-from analyzer import MAX_PRIORITY, PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze
-from config_io import ModConfig, read_config, sync_with_mods, write_config
-from mod_patcher import extract_modworkshop_id, patch_mod_archive
-from paths import (MOD_CONFIG_FILE, get_mods_folder, load_manual_locks,
-                   save_manual_locks, verify_mod_config_exists)
-from vmz_scanner import ModInfo, scan_mods_folder
+from .analyzer import MAX_PRIORITY, PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze
+from .config_io import ModConfig, read_config, sync_with_mods, write_config
+from .mod_patcher import extract_modworkshop_id, patch_mod_archive
+from .paths import (MOD_CONFIG_FILE, get_mods_folder, load_manual_locks,
+                    save_manual_locks, verify_mod_config_exists)
+from .vmz_scanner import ModInfo, scan_mods_folder
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")

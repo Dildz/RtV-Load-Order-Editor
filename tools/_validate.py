@@ -2,12 +2,15 @@
 
 Run this directly to sanity-check the brain before launching the GUI.
 """
+import sys
 from pathlib import Path
 
-from analyzer import analyze
-from config_io import read_config
-from paths import MOD_CONFIG_FILE
-from vmz_scanner import scan_mods_folder
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from rtv_editor.analyzer import analyze
+from rtv_editor.config_io import read_config
+from rtv_editor.paths import MOD_CONFIG_FILE
+from rtv_editor.vmz_scanner import scan_mods_folder
 
 MODS_FOLDER = Path(r"C:\Program Files (x86)\Steam\steamapps\common\Road to Vostok\mods")
 

@@ -3,8 +3,12 @@ __pycache__
 test_data/
 reference-repos/
 
-# Other
-api-1.yaml
+# Local-only docs (kept out of the repo)
+docs/api-1.yaml
+docs/modworkshop_api.md
+docs/OVERHAUL.md
 CLAUDE.md
-modworkshop_api.md
-OVERHAUL.md
+
+# Dev-only maintenance scripts (kept local, not committed)
+tools/_fetch_latest.py
+tools/_fetch_popular.py

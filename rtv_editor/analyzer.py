@@ -19,7 +19,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from vmz_scanner import MCM_MOD_ID, ModInfo
+from .vmz_scanner import MCM_MOD_ID, ModInfo
 
 PRIORITY_STEP = 5
 PRIORITY_START = 5
