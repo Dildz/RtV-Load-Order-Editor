@@ -716,7 +716,7 @@ class App(ctk.CTk):
 
     def _build_layout(self):
         # ── Top toolbar ──────────────────────────────────────────────────
-        top = ctk.CTkFrame(self, fg_color="transparent")
+        self._toolbar = top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=18, pady=(16, 8))
 
         title_block = ctk.CTkFrame(top, fg_color="transparent")
@@ -789,6 +789,29 @@ class App(ctk.CTk):
             font=FONT_SMALL, text_color=COLOR_TEXT_MUTED, anchor="e",
         ).pack(side="right")
 
+        # ── Bottom status bar ────────────────────────────────────────────
+        # Packed FIRST with side="bottom" so it always reserves its slot. If it
+        # were packed after the expanding paned window it'd get clipped off the
+        # bottom (taking the Notes button with it) whenever the list/notes grow.
+        # pack_propagate(False) fixes the height so the button can't be squeezed.
+        footer = ctk.CTkFrame(self, fg_color="transparent", height=28)
+        footer.pack(side="bottom", fill="x", padx=18, pady=(0, 10))
+        footer.pack_propagate(False)
+        # Pack the button BEFORE the label: an expand=True label packed first
+        # eats the whole footer width and squeezes the button to nothing.
+        self.notes_btn = ctk.CTkButton(
+            footer, text="Notes ▲", width=64, height=22,
+            corner_radius=6, font=FONT_SMALL,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=self._toggle_notes,
+        )
+        self.notes_btn.pack(side="right")
+        self.footer_label = ctk.CTkLabel(
+            footer, text="", font=FONT_SMALL,
+            text_color=COLOR_TEXT_MUTED, anchor="w",
+        )
+        self.footer_label.pack(side="left", fill="x", expand=True)
+
         # ── Resizable split: mod list / notes ────────────────────────────
         self.paned = tk.PanedWindow(
             self, orient="vertical",
@@ -796,6 +819,10 @@ class App(ctk.CTk):
             bg=COLOR_BG[1], bd=0,
         )
         self.paned.pack(fill="both", expand=True, padx=18, pady=(4, 8))
+        # Remember the notes height only when the user drags the sash — NOT on
+        # every collapse. Capturing on hide clobbers the saved size during rapid
+        # toggling (the pane hasn't re-expanded yet, so it reads the default).
+        self.paned.bind("<ButtonRelease-1>", self._on_sash_release)
 
         # Wrap the scrollable list in a plain frame (PanedWindow can't host
         # a CTkScrollableFrame directly — its internal canvas confuses it).
@@ -807,30 +834,24 @@ class App(ctk.CTk):
         self._setup_smooth_scroll()
         self.paned.add(list_wrapper, minsize=140, stretch="always")
 
-        notes_container = ctk.CTkFrame(
+        # Built now but NOT added to the paned window — the notes pane starts
+        # collapsed and is shown via the Notes toggle / after Analyze.
+        self.notes_container = ctk.CTkFrame(
             self.paned, fg_color=COLOR_CARD,
             corner_radius=10, border_width=1, border_color=COLOR_BORDER,
         )
         ctk.CTkLabel(
-            notes_container, text="Notes & Warnings",
+            self.notes_container, text="Notes & Warnings",
             font=FONT_SECTION, text_color=COLOR_TEXT, anchor="w",
         ).pack(fill="x", padx=14, pady=(10, 4))
         self.notes_box = ctk.CTkTextbox(
-            notes_container, wrap="word", font=FONT_BODY,
+            self.notes_container, wrap="word", font=FONT_BODY,
             fg_color="transparent", border_width=0,
         )
         self.notes_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.notes_box.configure(state="disabled")
-        self.paned.add(notes_container, minsize=100, stretch="never")
-
-        # ── Bottom status bar ────────────────────────────────────────────
-        footer = ctk.CTkFrame(self, fg_color="transparent", height=24)
-        footer.pack(fill="x", padx=18, pady=(0, 10))
-        self.footer_label = ctk.CTkLabel(
-            footer, text="", font=FONT_SMALL,
-            text_color=COLOR_TEXT_MUTED, anchor="w",
-        )
-        self.footer_label.pack(side="left", fill="x", expand=True)
+        self.notes_visible = False
+        self.notes_height: int | None = None  # last dragged pane height, px
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -893,8 +914,19 @@ class App(ctk.CTk):
             self.update()
             self.deiconify()
             self.update_idletasks()
-            h = self.winfo_height()
-            self.paned.sash_place(0, 1, h - 80)
+            # Size the window to exactly fit the toolbar (title + buttons), so
+            # there's no wasted horizontal space beside the button row.
+            # Fit the window to the toolbar (title + buttons) with no wasted
+            # horizontal space. winfo_reqwidth() is in real (scaled) pixels,
+            # but CTk's geometry() re-applies the display scaling — so convert
+            # back to logical units first, or it double-scales and grows.
+            scaling = self._get_window_scaling()
+            # +40 buffer so there's a small gap between the title and the
+            # button row instead of them butting right up against each other.
+            want_w = int(self._toolbar.winfo_reqwidth() / scaling) + 2 * 18 + 40
+            cur_h = int(self.winfo_height() / scaling)
+            self.geometry(f"{want_w}x{cur_h}")
+            self.minsize(want_w, 480)
             if self._splash is not None:
                 self._splash.destroy()
                 self._splash = None
@@ -1042,7 +1074,7 @@ class App(ctk.CTk):
 
         self._rebuild_rows()
         self._show_notes(result)
-        self.after(50, self._expand_notes_pane)
+        self._show_notes_pane()  # auto-open so the analysis output is visible
         self.dirty = True
         self._set_status("Analysis applied — review and Save")
 
@@ -1214,11 +1246,46 @@ class App(ctk.CTk):
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
+    def _toggle_notes(self):
+        if self.notes_visible:
+            self._hide_notes_pane()
+        else:
+            self._show_notes_pane()
+
+    def _show_notes_pane(self):
+        """Add the notes pane to the split (if not already) and expand it,
+        restoring the last dragged height."""
+        if not self.notes_visible:
+            self.paned.add(self.notes_container, minsize=100, stretch="never")
+            self.notes_visible = True
+            self.notes_btn.configure(text="Notes ▼")
+        self.after(50, self._expand_notes_pane)
+
+    def _hide_notes_pane(self):
+        """Collapse the notes pane so the mod list gets the full height.
+        The height is remembered via _on_sash_release, not captured here."""
+        if self.notes_visible:
+            self.paned.forget(self.notes_container)
+            self.notes_visible = False
+            self.notes_btn.configure(text="Notes ▲")
+
+    def _on_sash_release(self, _event=None):
+        """After a sash drag, store the notes pane height so toggling restores
+        the user's chosen size."""
+        if self.notes_visible:
+            h = self.notes_container.winfo_height()
+            if h > 20:  # ignore a not-yet-laid-out pane
+                self.notes_height = h
+
     def _expand_notes_pane(self):
+        if not self.notes_visible:
+            return
         self.update_idletasks()
-        h = self.winfo_height()
-        notes_h = max(220, int(h * 0.35))
-        self.paned.sash_place(0, 1, h - notes_h)
+        paned_h = self.paned.winfo_height()
+        notes_h = self.notes_height or max(220, int(paned_h * 0.35))
+        # Keep the mod list usable — never let notes eat below its minsize.
+        notes_h = min(notes_h, max(100, paned_h - 140))
+        self.paned.sash_place(0, 1, paned_h - notes_h)
 
     def _setup_smooth_scroll(self):
         """Throttle canvas scroll commands to ~60fps so rapid input
