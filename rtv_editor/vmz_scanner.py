@@ -147,6 +147,10 @@ class ModInfo:
     registry_optin: bool = False
     # Registry API writes found in the mod's .gd source (register/override/etc.).
     registry_writes: list[RegistryWrite] = field(default_factory=list)
+    # Required dependency mod_ids from [dependencies] required=. Empty when the
+    # section is absent. MML itself ignores this section (it's a packaging
+    # convention), but the analyzer uses it for missing-dep / load-order checks.
+    dependencies: list[str] = field(default_factory=list)
 
     @property
     def cfg_key(self) -> str:
@@ -346,6 +350,22 @@ def _extract_script_extend_targets(sections: dict[str, dict[str, str]]) -> set[s
     return targets
 
 
+def _parse_dep_list(raw: str) -> list[str]:
+    """Split a [dependencies] value into mod_ids. Accepts CSV form (a, b, c) or
+    Godot array form (["a", "b", "c"]). Per-item quotes are stripped, so both
+    a wholly-quoted value and quoted array items resolve to bare ids.
+    """
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    return [dep for dep in (_strip_quotes(x).strip() for x in raw.split(",")) if dep]
+
+
+def _extract_dependencies(sections: dict[str, dict[str, str]]) -> list[str]:
+    """Required dependency mod_ids from [dependencies] required=, or []."""
+    return _parse_dep_list(sections.get("dependencies", {}).get("required", ""))
+
+
 def _extract_autoloads(sections: dict[str, dict[str, str]]) -> dict[str, str]:
     """Return the autoload name -> res:// path map.
 
@@ -393,6 +413,7 @@ def scan_archive(path: Path) -> ModInfo:
                     info.mod_id = mod_id
                     info.mod_version = version
                     info.autoloads = _extract_autoloads(sections)
+                    info.dependencies = _extract_dependencies(sections)
                     info.modworkshop_id = _extract_updates_id(sections)
                     cfg_script_extend_targets = _extract_script_extend_targets(sections)
                 except Exception as e:

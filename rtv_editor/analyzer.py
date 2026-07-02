@@ -621,6 +621,30 @@ def _build_constraints(
                 f'add an empty [registry] section.'
             )
 
+    # ── Declared dependencies ([dependencies] required=) ───────────────
+    # A required dependency must be installed AND load first (a LOWER load
+    # order number). We add an edge dep→dependent so the topo sort/priority
+    # pass orders them and the final sweep flags any ordering it can't satisfy
+    # (e.g. a locked dependent stuck below its dependency). A required id with
+    # no installed mod is a hard missing-dependency warning.
+    id_to_key: dict[str, str] = {}
+    for m in mods:
+        if m.mod_id and m.mod_id not in id_to_key:
+            id_to_key[m.mod_id] = m.cfg_key
+    for m in mods:
+        for dep_id in m.dependencies:
+            if dep_id == m.mod_id:
+                continue  # self-reference — ignore
+            dep_key = id_to_key.get(dep_id)
+            if dep_key is None:
+                warnings.append(
+                    f'"{m.display_name}" requires "{dep_id}", which is not '
+                    f'installed. Install it, or "{m.display_name}" may not '
+                    f'work correctly (missing dependency).'
+                )
+            elif dep_key != m.cfg_key:
+                edges[dep_key].add(m.cfg_key)
+
     # ── Mod Configuration Menu soft dependency ─────────────────────────
     # Mods that reference res://ModConfigurationMenu/... need MCM to load
     # before them, otherwise their config UI never appears. MCM ships with
