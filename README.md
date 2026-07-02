@@ -43,6 +43,10 @@ adjust enabled state / priority as needed → **Save** to write
 `[updates]` block needed for in-game update checks. Use **Rename .zip →
 .vmz** to bulk-convert legacy `.zip` archives to the newer `.vmz` extension.
 
+Conflicts and load-order notes appear in a collapsible **Notes & Warnings**
+panel — it opens automatically after Analyze, and the **Notes** button at the
+bottom-right toggles it (drag its top edge to resize; the size is remembered).
+
 Stale cfg entries — left behind when a mod is updated or removed outside
 the editor (e.g. via the in-game loader, which leaves an old
 `mod-id@<old-version>` key pointing at a file that's no longer there) —
@@ -52,8 +56,9 @@ are dropped automatically on load. Click Save to persist the cleaned cfg.
 
 1. **Scan** — opens each `.vmz`/`.zip` in the mods folder and extracts:
    - `mod.txt` metadata: `name`, `id`, `version`, `priority`, `[autoload]`
-     entries, and `[updates]`/`modworkshop=<id>` if present. The opt-in
-     sections `[registry]`, `[hooks]`, and `[script_extend]` are detected too
+     entries, `[updates]`/`modworkshop=<id>`, and `[dependencies] required=`
+     if present. The opt-in sections `[registry]`, `[hooks]`, and
+     `[script_extend]` are detected too
    - Every `.gd` script's `extends "res://Scripts/X.gd"` base, `class_name`
      declaration, and per-function `super()` usage
    - `take_over_path()` targets — resolved three ways: literal string args,
@@ -88,6 +93,9 @@ are dropped automatically on load. Click Save to persist the cleaned cfg.
      `(registry, id)` — or the same AI zone — and two mods `patch`ing the
      **same field** of the same entry (xEdit-style; different fields compose).
      Also warns when registry calls need a `[registry]` opt-in that's missing
+   - **Declared dependencies**: a mod's `[dependencies] required=` entries must
+     be installed and load first — a missing dependency is flagged, and the
+     load order is constrained so each dependent sits above its dependency
    - **MCM soft dependency**: mods referencing MCM must load after MCM
    - Also detects: duplicate mod IDs, duplicate autoload names, shared file
      paths across archives (higher-priority archive wins at mount), and
