@@ -16,7 +16,7 @@ Rules:
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from .vmz_scanner import MCM_MOD_ID, ModInfo
@@ -205,22 +205,45 @@ class Recommendation:
     reason: str           # human-readable explanation
 
 
+# A base needs at least this many colliding functions among its takeover mods
+# to count as a "heavy overlap" cluster; a mod must itself clash on at least
+# MEMBER_MIN to be listed as a cluster member (keeps tiny single-function mods
+# out of the "pick one" choice).
+CLUSTER_MIN_CONFLICTS = 4
+CLUSTER_MEMBER_MIN_CONFLICTS = 2
+
+
+@dataclass
+class ModConflictCluster:
+    """Several mods that all replace the same base script and collide heavily —
+    they can't meaningfully coexist, so the user should keep one."""
+    base: str                        # e.g. "AI"
+    label: str                       # gameplay label, e.g. "enemy AI"
+    conflict_count: int              # how many functions they collide on
+    members: list[str]               # cfg_keys, richest-first
+    systems: dict[str, list[str]]    # cfg_key -> other base scripts it also touches
+    feature_counts: dict[str, int]   # cfg_key -> number of overridden functions
+    recommended_keep: str            # richest member's cfg_key
+
+
 @dataclass
 class AnalysisResult:
     recommendations: list[Recommendation]
     warnings: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     suggest_disable: list[str] = field(default_factory=list)  # cfg keys
+    clusters: list[ModConflictCluster] = field(default_factory=list)
 
 
 def _build_constraints(
     mods: list[ModInfo],
-) -> tuple[dict[str, set[str]], list[str], list[str], list[str]]:
-    """Return (edges, warnings, notes, suggest_disable).
+) -> tuple[dict[str, set[str]], list[str], list[str], list[str], list[ModConflictCluster]]:
+    """Return (edges, warnings, notes, suggest_disable, clusters).
 
     edges[a] = set of mods that must load AFTER a (i.e. a -> b means a loads before b).
     suggest_disable: cfg keys the user should consider disabling (when a
         conflict has no resolvable load order).
+    clusters: heavy-overlap groups the GUI can offer a "keep one" choice for.
     """
     edges: dict[str, set[str]] = {m.cfg_key: set() for m in mods}
     warnings: list[str] = []
@@ -228,6 +251,7 @@ def _build_constraints(
     suggest_disable: list[str] = []
 
     name_for = {m.cfg_key: m.display_name for m in mods}
+    mod_by_key = {m.cfg_key: m for m in mods}
     total_funcs = {
         m.cfg_key: sum(len(ovr.functions) for ovr in m.overrides) for m in mods
     }
@@ -411,6 +435,53 @@ def _build_constraints(
                     (m.cfg_key, fn.calls_super)
                 )
 
+    # ── Heavy-overlap clusters (e.g. several full AI overhauls) ────────
+    # When 3+ mods all take_over the same base AND collide on many of its
+    # functions, they can't meaningfully coexist. Detect the cluster so the GUI
+    # can offer one "keep this one" choice, and (below) suppress the individual
+    # per-function warnings/edges BETWEEN cluster members — conflicts that also
+    # involve a non-member mod are kept, since that mod still needs its note.
+    takeover_by_base: dict[str, set[str]] = defaultdict(set)
+    for m in mods:
+        for ovr in m.overrides:
+            if ovr.takes_over_base:
+                takeover_by_base[ovr.base_script].add(m.cfg_key)
+
+    conflicts_per_base: dict[str, list[str]] = defaultdict(list)
+    conflict_mods_per_base: dict[str, Counter] = defaultdict(Counter)
+    for (base, func), gmembers in groups.items():
+        ns = [k for k, sup in gmembers if not sup]
+        if len(ns) >= 2:
+            conflicts_per_base[base].append(func)
+            for k in ns:
+                conflict_mods_per_base[base][k] += 1
+
+    clusters: list[ModConflictCluster] = []
+    cluster_members: dict[str, set[str]] = {}
+    for base, tmods in takeover_by_base.items():
+        if len(tmods) < 3 or len(conflicts_per_base.get(base, [])) < CLUSTER_MIN_CONFLICTS:
+            continue
+        members = {k for k in tmods
+                   if conflict_mods_per_base[base][k] >= CLUSTER_MEMBER_MIN_CONFLICTS}
+        if len(members) < 3:
+            continue
+        ranked = sorted(members, key=lambda k: total_funcs.get(k, 0), reverse=True)
+        systems = {
+            k: sorted({o.base_script for o in mod_by_key[k].overrides
+                       if o.base_script != base})
+            for k in ranked
+        }
+        clusters.append(ModConflictCluster(
+            base=base,
+            label=GAMEPLAY_SCRIPT_LABELS.get(base, base),
+            conflict_count=len(conflicts_per_base[base]),
+            members=ranked,
+            systems=systems,
+            feature_counts={k: total_funcs.get(k, 0) for k in ranked},
+            recommended_keep=ranked[0],
+        ))
+        cluster_members[base] = members
+
     for (base, func), members in groups.items():
         if len(members) < 2:
             continue
@@ -437,6 +508,12 @@ def _build_constraints(
         #   - If ALL mods would die when losing, no load order saves them.
         #     Recommend disabling all but the largest mod.
         if len(nosuper) >= 2:
+            # Covered by a heavy-overlap cluster card? Suppress only when EVERY
+            # clashing mod is a cluster member; a conflict that also involves an
+            # outside mod keeps its own note.
+            cmembers = cluster_members.get(base)
+            if cmembers and all(n in cmembers for n in nosuper):
+                continue
             feature = _humanize_function(base, func)
             label = GAMEPLAY_SCRIPT_LABELS.get(base)
             if label:
@@ -529,7 +606,7 @@ def _build_constraints(
         #
         # So: no forced keeper, no "one wins" warning — just an info note so
         # the user knows a chain is forming.
-        if len(tmods) >= 2:
+        if len(tmods) >= 2 and base not in cluster_members:
             listed = ", ".join(f'"{name_for[t]}"' for t in tmods)
             label = GAMEPLAY_SCRIPT_LABELS.get(base)
             if label:
@@ -704,7 +781,7 @@ def _build_constraints(
                 f'to enable them.'
             )
 
-    return edges, warnings, notes, suggest_disable
+    return edges, warnings, notes, suggest_disable, clusters
 
 
 def _topo_sort(nodes: list[str], edges: dict[str, set[str]]) -> tuple[list[str], list[str]]:
@@ -753,7 +830,7 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     locked: list[ModInfo] = [m for m in mods if m.declared_priority is not None]
     free: list[ModInfo] = [m for m in mods if m.declared_priority is None]
 
-    edges, warnings, notes, suggest_disable = _build_constraints(mods)
+    edges, warnings, notes, suggest_disable, clusters = _build_constraints(mods)
 
     free_keys = [m.cfg_key for m in free]
     sorted_free, cycle_warnings = _topo_sort(free_keys, edges)
@@ -980,4 +1057,5 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         warnings=warnings,
         notes=notes,
         suggest_disable=suggest_disable,
+        clusters=clusters,
     )
