@@ -68,6 +68,14 @@ LIFECYCLE_DESCRIPTIONS = {
 }
 
 
+# Base scripts whose conflicts are worth framing in gameplay terms rather than
+# raw script names, so users recognise an enemy/spawn conflict when they see one.
+GAMEPLAY_SCRIPT_LABELS = {
+    "AI":        "enemy AI behaviour",
+    "AISpawner": "enemy spawns",
+}
+
+
 def _humanize_function(base_script: str, func_name: str) -> str:
     """Convert e.g. ('Character', 'FireAccuracy') -> 'character fire accuracy'."""
     if func_name in LIFECYCLE_DESCRIPTIONS:
@@ -104,7 +112,7 @@ REGISTRY_NEEDS_OPTIN = frozenset({
 def _humanize_registry(registry: str, key: str) -> str:
     """Readable phrase for a (registry, key) pair. AI_TYPES keys are zones."""
     if key.startswith("zone:"):
-        return f'the AI type for zone "{key[len("zone:"):]}"'
+        return f'which enemy spawns in zone "{key[len("zone:"):]}"'
     return f'the {registry.lower()} entry "{key}"'
 
 
@@ -430,6 +438,9 @@ def _build_constraints(
         #     Recommend disabling all but the largest mod.
         if len(nosuper) >= 2:
             feature = _humanize_function(base, func)
+            label = GAMEPLAY_SCRIPT_LABELS.get(base)
+            if label:
+                feature = f"{label} — {feature}"
             severities = {n: _severity(func, total_funcs[n]) for n in nosuper}
             dying = [n for n in nosuper if severities[n] != "minor"]
             survivors = [n for n in nosuper if severities[n] == "minor"]
@@ -520,12 +531,26 @@ def _build_constraints(
         # the user knows a chain is forming.
         if len(tmods) >= 2:
             listed = ", ".join(f'"{name_for[t]}"' for t in tmods)
-            notes.append(
-                f'{ICON_INFO}  {listed}\n'
-                f'All replace {base}.gd and stack via inheritance — each builds on '
-                f'the one before it, so every mod stays active. Any function several '
-                f'of them override without super() is listed above.'
-            )
+            label = GAMEPLAY_SCRIPT_LABELS.get(base)
+            if label:
+                # Gameplay-critical scripts are full of hard-coded tunables (spawn
+                # counts, AI values) that DON'T compose through inheritance — the
+                # highest-numbered replacer silently wins those. Flag as a conflict.
+                warnings.append(
+                    f'{ICON_CAUTION}  {listed}\n'
+                    f'All change {label} by replacing {base}.gd. They stack via '
+                    f'inheritance, but where two hard-code the same value, only the '
+                    f"highest-numbered mod's applies — the others are silently "
+                    f'overridden.\n'
+                    f'[technical: multiple take_over_path on res://Scripts/{base}.gd]'
+                )
+            else:
+                notes.append(
+                    f'{ICON_INFO}  {listed}\n'
+                    f'All replace {base}.gd and stack via inheritance — each builds on '
+                    f'the one before it, so every mod stays active. Any function several '
+                    f'of them override without super() is listed above.'
+                )
 
     # ── Replace-hook collisions ────────────────────────────────────────
     # RTVModLib "replace" hooks (bare name, no -pre/-post/-callback suffix) are
