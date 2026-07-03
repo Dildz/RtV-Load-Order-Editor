@@ -106,15 +106,6 @@ class ModRow(tk.Frame):
         self._on_toggle_lock = on_toggle_lock
         self._dupe = False
 
-        if not enabled:
-            name_color = _TEXT_DIM_FG
-        elif suggest_disable:
-            name_color = _WARNING_FG
-        elif locked:
-            name_color = _LOCK_FG
-        else:
-            name_color = _TEXT_FG
-
         self.enabled_var = ctk.BooleanVar(value=enabled)
         self.check = ctk.CTkCheckBox(
             self, text="", width=22,
@@ -123,16 +114,12 @@ class ModRow(tk.Frame):
         )
         self.check.grid(row=0, column=0, padx=(12, 8), pady=10)
 
-        # The lock chip on every row is the single lock indicator now, so the
-        # name only carries the ⚠ suggest-disable marker.
-        prefix = "⚠ " if suggest_disable else ""
+        # Text/colour are set by _apply_visual_state() at the end of __init__ and
+        # on every refresh — the lock chip is the sole lock indicator, so the name
+        # only carries the ⚠ suggest-disable marker.
         self.label = tk.Label(
-            self,
-            text=f"{prefix}{display_name}",
-            anchor="w",
-            font=FONT_BODY,
-            fg=name_color,
-            bg=_CARD_BG,
+            self, text=display_name, anchor="w",
+            font=FONT_BODY, fg=_TEXT_FG, bg=_CARD_BG,
         )
         self.label.grid(row=0, column=1, sticky="w", padx=(0, 4))
 
@@ -174,6 +161,8 @@ class ModRow(tk.Frame):
         for w in (self, self.label, self.subtitle):
             w.bind("<Enter>", self._on_hover_in)
             w.bind("<Leave>", self._on_hover_out)
+
+        self._apply_visual_state()  # set name colour/prefix + lock chip
 
     def _make_arrow_btn(self, text: str, command):
         btn = tk.Label(
@@ -220,19 +209,34 @@ class ModRow(tk.Frame):
         self.label.configure(bg=_CARD_BG)
         self.subtitle.configure(bg=_CARD_BG)
 
+    def _apply_visual_state(self):
+        """Set the name colour/prefix and lock chip from the current
+        enabled/locked/suggest_disable state. Single source of truth for both
+        the first build and every refresh."""
+        if not self.enabled_var.get():
+            color = _TEXT_DIM_FG
+        elif self.suggest_disable:
+            color = _WARNING_FG
+        elif self.locked:
+            color = _LOCK_FG
+        else:
+            color = _TEXT_FG
+        prefix = "⚠ " if self.suggest_disable else ""
+        self.label.configure(text=f"{prefix}{self._display_name}", fg=color)
+        self._style_lock_btn()
+
+    def refresh(self, priority, enabled, locked, suggest_disable):
+        """Update a reused row in place — no widget recreation. Setting the vars
+        does not fire the widget callbacks (those fire only on user action)."""
+        self.locked = locked
+        self.suggest_disable = suggest_disable
+        self.enabled_var.set(enabled)
+        self.priority_var.set(str(priority))
+        self._apply_visual_state()
+
     def update_lock_state(self, locked: bool):
         self.locked = locked
-        if not self.enabled_var.get():
-            name_color = _TEXT_DIM_FG
-        elif self.suggest_disable:
-            name_color = _WARNING_FG
-        elif locked:
-            name_color = _LOCK_FG
-        else:
-            name_color = _TEXT_FG
-        prefix = "⚠ " if self.suggest_disable else ""
-        self.label.configure(text=f"{prefix}{self._display_name}", fg=name_color)
-        self._style_lock_btn()
+        self._apply_visual_state()
 
     def _enabled_changed(self):
         self.on_change(self.cfg_key, "enabled", self.enabled_var.get())
@@ -602,6 +606,22 @@ class RenameZipsDialog(ctk.CTkToplevel):
             self.destroy()
 
 
+def _primary_workarea():
+    """(left, top, width, height) of the primary monitor's work area, physical
+    px — the same source the main window uses, so overlays line up with it
+    instead of miscentering via winfo_screenwidth() on multi-monitor/DPI setups."""
+    import ctypes
+
+    class _R(ctypes.Structure):
+        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+    r = _R()
+    if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(r), 0):
+        return r.l, r.t, r.r - r.l, r.b - r.t
+    return 0, 0, 1920, 1080
+
+
 class SplashWindow(tk.Toplevel):
     """Loading window shown while the main window builds.
 
@@ -656,12 +676,12 @@ class SplashWindow(tk.Toplevel):
         )
         self._bar.pack(pady=(0, 22), padx=24)
 
-        # Center on screen
+        # Center on the primary work area (winfo_screenwidth misreports on
+        # multi-monitor / scaled displays).
         self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = (sw - self.WIDTH) // 2
-        y = (sh - self.HEIGHT) // 2
+        wl, wt, ww, wh = _primary_workarea()
+        x = wl + (ww - self.WIDTH) // 2
+        y = wt + (wh - self.HEIGHT) // 2
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}+{x}+{y}")
 
     def set_progress(self, current: int, total: int, message: str = ""):
@@ -670,6 +690,59 @@ class SplashWindow(tk.Toplevel):
         if message:
             self._status.configure(text=message)
         self.update()  # force immediate paint while the caller is busy
+
+
+class BusyOverlay(tk.Toplevel):
+    """Small 'working…' overlay centered over the app window. Uses a fixed
+    message and an indeterminate bar animated by the event loop — no per-phase
+    text swapping (which ghosts on an overrideredirect window) and no fake
+    percentages."""
+
+    W, H = 300, 112
+
+    def __init__(self, master, message="Working…"):
+        super().__init__(master)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(bg=_BORDER_BG)  # 1px outer border
+
+        inner = tk.Frame(self, bg=_CARD_BG)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(
+            inner, text=message, font=FONT_BODY, fg=_TEXT_FG, bg=_CARD_BG,
+        ).pack(pady=(22, 12), padx=24)
+
+        style = ttk.Style(self)
+        try:
+            style.theme_use("default")
+        except tk.TclError:
+            pass
+        style.configure(
+            "Busy.Horizontal.TProgressbar",
+            troughcolor=_BORDER_BG, background=COLOR_ACCENT,
+            bordercolor=_BORDER_BG, lightcolor=COLOR_ACCENT,
+            darkcolor=COLOR_ACCENT, thickness=8,
+        )
+        self._bar = ttk.Progressbar(
+            inner, style="Busy.Horizontal.TProgressbar",
+            mode="indeterminate", length=self.W - 56,
+        )
+        self._bar.pack(pady=(0, 22), padx=24)
+        self._bar.start(12)  # animate via the event loop
+
+        # Center over the app window (not the screen) so it lands correctly
+        # regardless of monitor / DPI.
+        master.update_idletasks()
+        x = master.winfo_rootx() + (master.winfo_width() - self.W) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - self.H) // 2
+        self.geometry(f"{self.W}x{self.H}+{x}+{y}")
+
+    def close(self):
+        try:
+            self._bar.stop()
+            self.destroy()
+        except tk.TclError:
+            pass
 
 
 class App(ctk.CTk):
@@ -685,6 +758,7 @@ class App(ctk.CTk):
         self.scanned_mods: list[ModInfo] = []
         self.cfg: ModConfig = ModConfig()
         self.rows: list[ModRow] = []
+        self.rows_by_key: dict[str, ModRow] = {}  # reuse rows across re-analyses
         self.suggest_disable: set[str] = set()
         self.manual_locks: set[str] = set()
         self.dirty = False
@@ -826,6 +900,11 @@ class App(ctk.CTk):
             self.notes_container, text="Notes & Warnings",
             font=FONT_SECTION, text_color=COLOR_TEXT, anchor="w",
         ).pack(fill="x", padx=14, pady=(10, 4))
+        # Interactive "keep one" cards for heavy-overlap clusters are packed
+        # directly above the text notes (CTkTextbox can't host buttons), and
+        # tracked so each render can clear the previous set. Packing them into a
+        # persistent wrapper is avoided — an empty CTkFrame reserves 200px.
+        self.cluster_cards: list = []
         self.notes_box = ctk.CTkTextbox(
             self.notes_container, wrap="word", font=FONT_BODY,
             fg_color="transparent", border_width=0,
@@ -940,36 +1019,50 @@ class App(ctk.CTk):
                 self._splash = None
 
     def _rebuild_rows(self):
-        for row in self.rows:
-            row.destroy()
-        self.rows = []
-
+        # Reuse existing row widgets across re-analyses — building ~8 CTk widgets
+        # per row is the expensive part, so refresh in place and only create /
+        # destroy when mods are actually added or removed.
         mods_by_key = {m.cfg_key: m for m in self.scanned_mods}
+        new_rows: list[ModRow] = []
+        seen: set[str] = set()
 
         for key in self.cfg.order:
             mod_info = mods_by_key.get(key)
             display_name = mod_info.display_name if mod_info else key
             declared_locked = mod_info.declared_priority is not None if mod_info else False
-            manually_locked = key in self.manual_locks
-            locked = declared_locked or manually_locked
+            can_toggle = not declared_locked
+            locked = declared_locked or key in self.manual_locks
+            enabled = self.cfg.enabled.get(key, True)
+            priority = self.cfg.priority.get(key, 0)
+            sug = key in self.suggest_disable
 
-            row = ModRow(
-                self.list_frame,
-                cfg_key=key,
-                display_name=display_name,
-                priority=self.cfg.priority.get(key, 0),
-                enabled=self.cfg.enabled.get(key, True),
-                locked=locked,
-                suggest_disable=key in self.suggest_disable,
-                on_change=self._on_row_change,
-                on_move=self._on_row_move,
-                can_toggle_lock=not declared_locked,
-                on_toggle_lock=lambda k=key: self._toggle_manual_lock(k),
-            )
-            self.rows.append(row)
+            row = self.rows_by_key.get(key)
+            # Reuse only if the structure is unchanged — display name and
+            # lock-ability only change on a re-scan, not on Analyze.
+            if row is not None and row._display_name == display_name \
+                    and row._can_toggle_lock == can_toggle:
+                row.refresh(priority, enabled, locked, sug)
+            else:
+                if row is not None:
+                    row.destroy()
+                row = ModRow(
+                    self.list_frame, cfg_key=key, display_name=display_name,
+                    priority=priority, enabled=enabled, locked=locked,
+                    suggest_disable=sug, on_change=self._on_row_change,
+                    on_move=self._on_row_move, can_toggle_lock=can_toggle,
+                    on_toggle_lock=lambda k=key: self._toggle_manual_lock(k),
+                )
+                self._bind_drag(row)
+            new_rows.append(row)
+            seen.add(key)
 
-        for row in self.rows:
-            self._bind_drag(row)
+        # Drop rows for mods no longer present.
+        for key, row in self.rows_by_key.items():
+            if key not in seen:
+                row.destroy()
+
+        self.rows = new_rows
+        self.rows_by_key = {r.cfg_key: r for r in new_rows}
         self._repack_rows()
         self._check_dupe_priorities()
 
@@ -1031,24 +1124,46 @@ class App(ctk.CTk):
                 row.update_lock_state(locked)
                 break
 
+    # Minimum time the "Analyzing…" overlay stays up, so a near-instant analysis
+    # still reads as a deliberate action instead of a flicker. The analyzer runs
+    # at full speed — this only holds the overlay, it does NOT slow the work.
+    _ANALYZE_MIN_MS = 500
+
     def _on_analyze(self):
         if not self.scanned_mods:
             messagebox.showwarning("No mods", "Nothing to analyze.")
             return
 
-        result = analyze(self.scanned_mods)
+        overlay = BusyOverlay(self, "Analyzing mods…")
+        # Let the bar animate for the min display time with the event loop free,
+        # THEN run the (blocking) analysis + UI rebuild and close. The analyser
+        # isn't slowed — it just runs after the spinner, so the bar animates
+        # smoothly instead of freezing under the synchronous work.
+        self.after(self._ANALYZE_MIN_MS, lambda: self._run_analysis(overlay))
+
+    def _run_analysis(self, overlay):
+        # Only enabled mods are actually loaded, so only they can conflict —
+        # analyse the enabled subset (disabled mods are carried through below).
+        enabled = [m for m in self.scanned_mods if self.cfg.enabled.get(m.cfg_key, True)]
+        result = analyze(enabled)
         self._apply_recommendation(result)
+        overlay.close()
 
     def _apply_recommendation(self, result: AnalysisResult):
-        self.cfg.order = [r.cfg_key for r in result.recommendations]
+        enabled_order = [r.cfg_key for r in result.recommendations]
+        # Disabled mods weren't analysed; keep them in the list (greyed, at 0).
+        disabled_keys = [m.cfg_key for m in self.scanned_mods if m.cfg_key not in enabled_order]
+        self.cfg.order = enabled_order + disabled_keys
         self.suggest_disable = set(result.suggest_disable)
+        self.clusters = result.clusters
 
         # Snapshot priorities for manually locked mods before renumbering
         preserved = {k: self.cfg.priority[k] for k in self.manual_locks if k in self.cfg.priority}
 
-        # Auto-disable mods flagged as dead — user can re-enable manually if desired
-        for key in self.suggest_disable:
-            self.cfg.enabled[key] = False
+        # Mods flagged as dead are shown with a ⚠ marker but left enabled — the
+        # user disables them (via a cluster card or the checkbox). Auto-disabling
+        # here changed the enabled set between analyses, so re-analysing gave a
+        # different result and silently dropped cluster cards.
 
         # Renumber priorities: locked mods keep their declared value, disabled
         # mods get 0 (so they don't waste a number that an enabled mod could use),
@@ -1066,6 +1181,10 @@ class App(ctk.CTk):
                 next_value += 1
             self.cfg.priority[r.cfg_key] = next_value
             next_value += PRIORITY_STEP
+
+        # Disabled mods aren't in the recommendation list — park them at 0.
+        for key in disabled_keys:
+            self.cfg.priority[key] = 0
 
         # Restore manually locked priorities (overrides whatever the analyzer assigned)
         for key, pri in preserved.items():
@@ -1396,7 +1515,69 @@ class App(ctk.CTk):
         box.tag_configure("note_section", foreground=_TEXT_MUTED_FG,
                           font=FONT_SECTION, spacing1=6, spacing3=4)
 
+    def _render_clusters(self, clusters):
+        """Rebuild the interactive 'keep one' cards above the text notes."""
+        for w in self.cluster_cards:
+            w.destroy()
+        self.cluster_cards = []
+        if not clusters:
+            return
+        names = {m.cfg_key: m.display_name for m in self.scanned_mods}
+        for c in clusters:
+            self.cluster_cards.append(self._build_cluster_card(c, names))
+
+    def _build_cluster_card(self, cluster, names):
+        # The red "border" is a solid outer frame with the card inset 2px inside
+        # it — a fill, not a 1px stroke, so nested child frames can't nibble it
+        # (which is what breaks CTkFrame's real border_width at high DPI).
+        outer = ctk.CTkFrame(self.notes_container, fg_color=COLOR_DUPE, corner_radius=8)
+        outer.pack(fill="x", padx=10, pady=(0, 6), before=self.notes_box)
+        card = ctk.CTkFrame(outer, fg_color=COLOR_CARD, corner_radius=6)
+        card.pack(fill="both", expand=True, padx=2, pady=2)
+        ctk.CTkLabel(
+            card, anchor="w", font=FONT_SECTION, text_color=COLOR_DUPE,
+            text=f"⚔  {len(cluster.members)} mods heavily overlap on "
+                 f"{cluster.label}  ·  {cluster.conflict_count} clashes",
+        ).pack(fill="x", padx=12, pady=(8, 0))
+        ctk.CTkLabel(
+            card, anchor="w", font=FONT_SMALL, text_color=COLOR_TEXT_MUTED,
+            text="They can't all fully work together — keep one, disable the rest:",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+        for k in cluster.members:
+            self._build_cluster_member_row(card, cluster, k, names)
+        ctk.CTkFrame(card, fg_color="transparent", height=4).pack()
+        return outer
+
+    def _build_cluster_member_row(self, card, cluster, key, names):
+        recommended = key == cluster.recommended_keep
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=2)
+        systems = cluster.systems.get(key, [])
+        extra = ""
+        if systems:
+            more = f" +{len(systems) - 3} more" if len(systems) > 3 else ""
+            extra = f"   ·   also touches {', '.join(systems[:3])}{more}"
+        ctk.CTkLabel(
+            row, anchor="w", font=FONT_BODY,
+            text_color=(COLOR_TEXT if recommended else COLOR_TEXT_MUTED),
+            text=f"{names.get(key, key)}   ({cluster.feature_counts[key]} changes){extra}",
+        ).pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            row, text="Keep (recommended)" if recommended else "Keep",
+            width=150 if recommended else 64, height=26, font=FONT_SMALL,
+            fg_color=(COLOR_PRIMARY if recommended else COLOR_NEUTRAL),
+            hover_color=(COLOR_PRIMARY_HV if recommended else COLOR_NEUTRAL_HV),
+            command=lambda k=key: self._resolve_cluster(cluster, k),
+        ).pack(side="right")
+
+    def _resolve_cluster(self, cluster, keep_key):
+        for k in cluster.members:
+            if k != keep_key:
+                self.cfg.enabled[k] = False
+        self._on_analyze()  # re-analyse enabled subset; the cluster collapses away
+
     def _show_notes(self, result: AnalysisResult):
+        self._render_clusters(result.clusters)
         self.notes_box.configure(state="normal")
         self.notes_box.delete("1.0", "end")
 
