@@ -3,20 +3,23 @@ from __future__ import annotations
 
 import shutil
 import tkinter as tk
+import webbrowser
 from collections import Counter, defaultdict
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
+from . import __version__ as APP_VERSION
 from .analyzer import (
     ICON_CAUTION, ICON_INFO, ICON_ORDER, ICON_SEVERE,
     MAX_PRIORITY, PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze,
 )
 from .config_io import ModConfig, read_config, sync_with_mods, write_config
 from .mod_patcher import extract_modworkshop_id, patch_mod_archive
-from .paths import (MOD_CONFIG_FILE, get_mods_folder, load_manual_locks,
-                    save_manual_locks, verify_mod_config_exists)
+from .paths import (MOD_CONFIG_FILE, get_mods_folder, load_help_seen_version,
+                    load_manual_locks, save_help_seen_version, save_manual_locks,
+                    verify_mod_config_exists)
 from .vmz_scanner import ModInfo, scan_mods_folder
 
 ctk.set_appearance_mode("dark")
@@ -54,6 +57,10 @@ _TEXT_DIM_FG   = COLOR_TEXT_DIM[1]
 _WARNING_FG    = COLOR_WARNING[1]
 _LOCK_FG       = COLOR_LOCK[1]
 _ENTRY_BG      = "#1a1a1a"
+
+# ── Links ──────────────────────────────────────────────────────────────────
+GITHUB_URL = "https://github.com/Dildz/RtV-Load-Order-Editor"
+KOFI_URL   = "https://ko-fi.com/dildz"
 
 # ── Fonts ──────────────────────────────────────────────────────────────────
 FONT_TITLE   = ("Segoe UI", 18, "bold")
@@ -622,6 +629,22 @@ def _primary_workarea():
     return 0, 0, 1920, 1080
 
 
+def _set_titlebar_color(win, hexcolor):
+    """Recolor a window's Windows 11 title bar (caption) to hexcolor like
+    '#2e2e2e', with light text. No-op on older Windows / on failure."""
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
+        ref = ctypes.c_int((b << 16) | (g << 8) | r)  # COLORREF 0x00BBGGRR
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(ctypes.c_int(1)), 4)  # dark mode
+        dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(ref), 4)             # caption color
+    except Exception:
+        pass
+
+
 class SplashWindow(tk.Toplevel):
     """Loading window shown while the main window builds.
 
@@ -693,10 +716,9 @@ class SplashWindow(tk.Toplevel):
 
 
 class BusyOverlay(tk.Toplevel):
-    """Small 'working…' overlay centered over the app window. Uses a fixed
-    message and an indeterminate bar animated by the event loop — no per-phase
-    text swapping (which ghosts on an overrideredirect window) and no fake
-    percentages."""
+    """Small 'working…' overlay centered over the app window. Fixed message (no
+    text swapping, which ghosts on an overrideredirect window) and a determinate
+    bar the caller fills 0→100 so it visibly completes."""
 
     W, H = 300, 112
 
@@ -725,10 +747,10 @@ class BusyOverlay(tk.Toplevel):
         )
         self._bar = ttk.Progressbar(
             inner, style="Busy.Horizontal.TProgressbar",
-            mode="indeterminate", length=self.W - 56,
+            mode="determinate", maximum=100, length=self.W - 56,
         )
+        self._bar["value"] = 0
         self._bar.pack(pady=(0, 22), padx=24)
-        self._bar.start(12)  # animate via the event loop
 
         # Center over the app window (not the screen) so it lands correctly
         # regardless of monitor / DPI.
@@ -737,12 +759,121 @@ class BusyOverlay(tk.Toplevel):
         y = master.winfo_rooty() + (master.winfo_height() - self.H) // 2
         self.geometry(f"{self.W}x{self.H}+{x}+{y}")
 
+    def set_value(self, v):
+        try:
+            self._bar["value"] = max(0, min(100, v))
+        except tk.TclError:
+            pass
+
     def close(self):
         try:
-            self._bar.stop()
             self.destroy()
         except tk.TclError:
             pass
+
+
+HELP_TEXT = """WHAT IT DOES
+Scans your Road to Vostok mods, works out which ones clash, and builds a load \
+order where your mods keep as many of their features as possible.
+
+QUICK START
+1. Refresh — scan your mods folder.
+2. Analyze Mods — work out the conflicts and a recommended order.
+3. Review the Notes & Warnings and resolve any conflicts.
+4. Save & Apply — write the order to the game.
+
+THE MOD LIST
+• Checkbox — turn a mod on or off.
+• Number — its load priority. Lower loads first; higher loads last and wins clashes.
+• ▲ ▼ — nudge a mod up or down by hand.
+• Locks — pin a mod's number so Analyze won't move it.
+    blue = click to lock,  gold = locked,  grey = locked by the mod's author.
+
+NOTES & WARNINGS
+The icon tells you the severity at a glance:
+⛔  Serious — the game won't boot, or a mod won't load at all.
+⚠   Caution — a mod silently loses a feature to another.
+🔢  Load order — two mods need a specific order; follow the fix shown.
+ℹ   Info — just a heads-up, nothing to fix.
+
+HEAVY-OVERLAP CARDS
+When several big mods rewrite the same thing (e.g. large AI overhauls), they \
+can't all fully work together. A red card lists them so you can pick one — click \
+"Keep" and the rest are disabled for you.
+
+RENAME .ZIP → .VMZ
+Some mods ship as .zip with the standard Road to Vostok mod format being .vmz \
+This finds any .zip files in your mods folder and renames them to .vmz — \
+(a backup is made first)
+
+
+MISSING UPDATE LINKS
+For a mod to auto-update, its mod.txt has to declare a ModWorkshop link. This \
+lists any mods missing one and lets you paste each mod's ModWorkshop URL — the \
+tool writes the link into the archive so it can update in future.
+"""
+
+
+class HelpWindow(ctk.CTkToplevel):
+    """Usage guide + links, opened from the ? button by the title."""
+
+    W, H = 700, 780
+
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Help & About — RtV Load Order Editor")
+        self.configure(fg_color=COLOR_BG)
+        self.transient(master)
+
+        ctk.CTkLabel(
+            self, text="RtV Load Order Editor", font=FONT_TITLE,
+            text_color=COLOR_TEXT, anchor="w",
+        ).pack(fill="x", padx=18, pady=(16, 0))
+        ctk.CTkLabel(
+            self, text="Manage your Road to Vostok mod load order", font=FONT_SMALL,
+            text_color=COLOR_TEXT_MUTED, anchor="w",
+        ).pack(fill="x", padx=18, pady=(0, 8))
+
+        box = ctk.CTkTextbox(
+            self, wrap="word", font=("Segoe UI", 13), fg_color=COLOR_CARD,
+            text_color=COLOR_TEXT, border_width=0,
+        )
+        box.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        box.insert("1.0", HELP_TEXT)
+        box.configure(state="disabled")
+
+        links = ctk.CTkFrame(self, fg_color="transparent")
+        links.pack(fill="x", padx=14, pady=(0, 16))
+        ctk.CTkButton(
+            links, text="GitHub Repo", height=34, corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=lambda: webbrowser.open(GITHUB_URL),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            links, text="Support on Ko-fi ☕", height=34, corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_PRIMARY, hover_color=COLOR_PRIMARY_HV,
+            command=lambda: webbrowser.open(KOFI_URL),
+        ).pack(side="left")
+        ctk.CTkButton(
+            links, text="Close", width=72, height=34, corner_radius=8, font=FONT_BODY,
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_NEUTRAL_HV,
+            command=self.destroy,
+        ).pack(side="right")
+
+        # Center over the app window. CTk scales geometry W/H by the display
+        # scaling but leaves the +x+y offset unscaled, so center using the
+        # PHYSICAL size against the parent's physical geometry.
+        master.update_idletasks()
+        scaling = self._get_window_scaling()
+        pw, ph = self.W * scaling, self.H * scaling
+        x = master.winfo_rootx() + (master.winfo_width() - pw) / 2
+        y = master.winfo_rooty() + (master.winfo_height() - ph) / 2
+        self.geometry(f"{self.W}x{self.H}+{max(0, int(x))}+{max(0, int(y))}")
+        # Dark title bar, a touch lighter than the app's, instead of white.
+        _set_titlebar_color(self, "#2e2e2e")
+        self.after(120, lambda: _set_titlebar_color(self, "#2e2e2e"))  # after full map
+        self.lift()
+        self.after(50, self.focus)
 
 
 class App(ctk.CTk):
@@ -778,10 +909,18 @@ class App(ctk.CTk):
         title_block = ctk.CTkFrame(top, fg_color="transparent")
         title_block.pack(side="left", fill="y")
 
+        title_row = ctk.CTkFrame(title_block, fg_color="transparent")
+        title_row.pack(anchor="w")
         ctk.CTkLabel(
-            title_block, text="RtV Load Order Editor",
+            title_row, text="RtV Load Order Editor",
             font=FONT_TITLE, text_color=COLOR_TEXT, anchor="w",
-        ).pack(anchor="w")
+        ).pack(side="left")
+        ctk.CTkButton(
+            title_row, text="?", width=24, height=24, corner_radius=12,
+            font=("Segoe UI", 13, "bold"),
+            fg_color=COLOR_NEUTRAL, hover_color=COLOR_ACCENT,
+            command=self._show_help,
+        ).pack(side="left", padx=(8, 0))
 
         self.status_label = ctk.CTkLabel(
             title_block, text="", font=FONT_SMALL,
@@ -1018,6 +1157,11 @@ class App(ctk.CTk):
                 self._splash.destroy()
                 self._splash = None
 
+            # First launch, or first launch after an update → show Help once.
+            if load_help_seen_version() != APP_VERSION:
+                save_help_seen_version(APP_VERSION)
+                self.after(400, self._show_help)  # let the window settle first
+
     def _rebuild_rows(self):
         # Reuse existing row widgets across re-analyses — building ~8 CTk widgets
         # per row is the expensive part, so refresh in place and only create /
@@ -1111,6 +1255,14 @@ class App(ctk.CTk):
         self.dirty = True
         self._set_status("Unsaved changes")
 
+    def _show_help(self):
+        win = getattr(self, "_help_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus()
+            return
+        self._help_win = HelpWindow(self)
+
     def _toggle_manual_lock(self, cfg_key: str):
         if cfg_key in self.manual_locks:
             self.manual_locks.discard(cfg_key)
@@ -1124,22 +1276,27 @@ class App(ctk.CTk):
                 row.update_lock_state(locked)
                 break
 
-    # Minimum time the "Analyzing…" overlay stays up, so a near-instant analysis
-    # still reads as a deliberate action instead of a flicker. The analyzer runs
-    # at full speed — this only holds the overlay, it does NOT slow the work.
-    _ANALYZE_MIN_MS = 500
+    # The "Analyzing…" overlay fills 0→100 over roughly _ANALYZE_STEP_MS ×
+    # (100 / _ANALYZE_STEP) ≈ 500ms, so a near-instant analysis still reads as a
+    # deliberate action that visibly completes. The analyser runs at full speed
+    # once the bar is full — this only paces the overlay, it does NOT slow work.
+    _ANALYZE_STEP = 4       # % added per tick
+    _ANALYZE_STEP_MS = 20   # ms between ticks
 
     def _on_analyze(self):
         if not self.scanned_mods:
             messagebox.showwarning("No mods", "Nothing to analyze.")
             return
+        self._animate_analyze(BusyOverlay(self, "Analyzing mods…"), 0)
 
-        overlay = BusyOverlay(self, "Analyzing mods…")
-        # Let the bar animate for the min display time with the event loop free,
-        # THEN run the (blocking) analysis + UI rebuild and close. The analyser
-        # isn't slowed — it just runs after the spinner, so the bar animates
-        # smoothly instead of freezing under the synchronous work.
-        self.after(self._ANALYZE_MIN_MS, lambda: self._run_analysis(overlay))
+    def _animate_analyze(self, overlay, value):
+        overlay.set_value(value)
+        if value >= 100:
+            # Let 100% paint, then run the (fast) work and close.
+            self.after(40, lambda: self._run_analysis(overlay))
+            return
+        self.after(self._ANALYZE_STEP_MS,
+                   lambda: self._animate_analyze(overlay, value + self._ANALYZE_STEP))
 
     def _run_analysis(self, overlay):
         # Only enabled mods are actually loaded, so only they can conflict —

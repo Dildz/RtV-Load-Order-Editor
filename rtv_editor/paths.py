@@ -37,6 +37,17 @@ def save_manual_locks(locks: set[str]) -> None:
     save_settings(settings)
 
 
+def load_help_seen_version() -> str | None:
+    """App version whose Help window the user has already seen, or None."""
+    return load_settings().get("help_seen_version")
+
+
+def save_help_seen_version(version: str) -> None:
+    settings = load_settings()
+    settings["help_seen_version"] = version
+    save_settings(settings)
+
+
 def _detect_steam_mods_folder() -> Path | None:
     """Search every Steam library folder for Road to Vostok's mods directory."""
     import re
