@@ -123,7 +123,9 @@ class ModRow(tk.Frame):
         )
         self.check.grid(row=0, column=0, padx=(12, 8), pady=10)
 
-        prefix = "🔒 " if locked else ("⚠ " if suggest_disable else "")
+        # The lock chip on every row is the single lock indicator now, so the
+        # name only carries the ⚠ suggest-disable marker.
+        prefix = "⚠ " if suggest_disable else ""
         self.label = tk.Label(
             self,
             text=f"{prefix}{display_name}",
@@ -140,6 +142,12 @@ class ModRow(tk.Frame):
         )
         self.subtitle.grid(row=0, column=2, sticky="w", padx=(0, 8))
 
+        # Lock chip sits just left of the number. Present on every row so the
+        # controls line up; greyed and non-interactive on author-declared rows
+        # (those can't be user-changed). Discoverable — right-click still works.
+        self.lock_btn = self._make_lock_btn(interactive=can_toggle_lock)
+        self.lock_btn.grid(row=0, column=3, padx=(8, 6), pady=8)
+
         self.priority_var = ctk.StringVar(value=str(priority))
         self.priority_entry = tk.Entry(
             self, textvariable=self.priority_var, width=5,
@@ -151,14 +159,14 @@ class ModRow(tk.Frame):
             highlightbackground=_BORDER_BG,
             highlightcolor=COLOR_ACCENT,
         )
-        self.priority_entry.grid(row=0, column=3, padx=(8, 4), pady=8, ipady=5)
+        self.priority_entry.grid(row=0, column=4, padx=(0, 4), pady=8, ipady=5)
         self.priority_entry.bind("<FocusOut>", lambda e: self._priority_changed())
         self.priority_entry.bind("<Return>", lambda e: self._priority_changed())
 
         self.up_btn = self._make_arrow_btn("▲", lambda: self.on_move(self.cfg_key, -1))
-        self.up_btn.grid(row=0, column=4, padx=2, pady=8)
+        self.up_btn.grid(row=0, column=5, padx=2, pady=8)
         self.down_btn = self._make_arrow_btn("▼", lambda: self.on_move(self.cfg_key, +1))
-        self.down_btn.grid(row=0, column=5, padx=(2, 12), pady=8)
+        self.down_btn.grid(row=0, column=6, padx=(2, 12), pady=8)
 
         self.grid_columnconfigure(2, weight=1)
 
@@ -166,10 +174,6 @@ class ModRow(tk.Frame):
         for w in (self, self.label, self.subtitle):
             w.bind("<Enter>", self._on_hover_in)
             w.bind("<Leave>", self._on_hover_out)
-
-        if can_toggle_lock:
-            for w in (self, self.label, self.subtitle):
-                w.bind("<Button-3>", self._show_context_menu, add="+")
 
     def _make_arrow_btn(self, text: str, command):
         btn = tk.Label(
@@ -182,6 +186,30 @@ class ModRow(tk.Frame):
         btn.bind("<Leave>", lambda e: btn.configure(bg=COLOR_NEUTRAL))
         return btn
 
+    def _make_lock_btn(self, interactive: bool):
+        btn = tk.Label(self, font=FONT_BODY, bg=COLOR_NEUTRAL, padx=8, pady=2)
+        self._style_lock_btn(btn)
+        if interactive:
+            btn.configure(cursor="hand2")
+            btn.bind("<Button-1>", lambda e: self._on_toggle_lock())
+            btn.bind("<Enter>", lambda e: btn.configure(bg=COLOR_NEUTRAL_HV))
+            btn.bind("<Leave>", lambda e: btn.configure(bg=COLOR_NEUTRAL))
+        return btn
+
+    def _style_lock_btn(self, btn=None):
+        """Reflect lock state on the chip. Toggleable rows get colour so they
+        read as clickable — blue 🔓 when open, gold 🔒 when locked. Author-declared
+        rows show a greyed 🔒 that can't be changed."""
+        btn = btn if btn is not None else self.lock_btn
+        icon = "🔒" if self.locked else "🔓"
+        if not self._can_toggle_lock:
+            fg = _TEXT_DIM_FG            # author-declared — greyed, not interactive
+        elif self.locked:
+            fg = _LOCK_FG               # gold — locked
+        else:
+            fg = COLOR_ACCENT           # blue — clickable, unlocked
+        btn.configure(text=icon, fg=fg)
+
     def _on_hover_in(self, _):
         self.configure(bg=_CARD_HOVER_BG)
         self.label.configure(bg=_CARD_HOVER_BG)
@@ -191,56 +219,6 @@ class ModRow(tk.Frame):
         self.configure(bg=_CARD_BG)
         self.label.configure(bg=_CARD_BG)
         self.subtitle.configure(bg=_CARD_BG)
-
-    def _show_context_menu(self, event):
-        # Custom Toplevel popup so we can control item padding (tk.Menu won't
-        # let us). The earlier version of this used grab_set() which could
-        # get stuck if grab_release raised TclError — instead we dismiss via
-        # <FocusOut> (popup loses focus when user clicks outside) plus an
-        # `alive` flag to prevent any double-destroy.
-        popup = tk.Toplevel(self.winfo_toplevel())
-        popup.overrideredirect(True)
-        popup.attributes("-topmost", True)
-        popup.configure(bg=_BORDER_BG)  # acts as the 1px outer border
-
-        inner = tk.Frame(popup, bg=_CARD_BG)
-        inner.pack(padx=1, pady=1)
-
-        icon = "🔓 " if self.locked else "🔒 "
-        action = "Unlock priority" if self.locked else "Lock priority"
-        item = tk.Label(
-            inner, text=f"{icon}{action}",
-            font=FONT_SMALL, fg=_TEXT_FG, bg=_CARD_BG,
-            padx=14, pady=6, anchor="w",
-            cursor="hand2",
-        )
-        item.pack(fill="x")
-
-        alive = [True]
-
-        def _dismiss(_e=None):
-            if not alive[0]:
-                return
-            alive[0] = False
-            try:
-                popup.destroy()
-            except tk.TclError:
-                pass
-
-        def _select(_e=None):
-            _dismiss()
-            self._on_toggle_lock()
-
-        item.bind("<Button-1>", _select)
-        item.bind("<Enter>", lambda e: item.configure(bg=COLOR_ACCENT, fg="#ffffff"))
-        item.bind("<Leave>", lambda e: item.configure(bg=_CARD_BG, fg=_TEXT_FG))
-
-        popup.update_idletasks()
-        popup.geometry(f"+{event.x_root}+{event.y_root}")
-        popup.lift()
-        popup.focus_set()
-        popup.bind("<FocusOut>", _dismiss)
-        popup.bind("<Escape>", _dismiss)
 
     def update_lock_state(self, locked: bool):
         self.locked = locked
@@ -252,8 +230,9 @@ class ModRow(tk.Frame):
             name_color = _LOCK_FG
         else:
             name_color = _TEXT_FG
-        prefix = "🔒 " if locked else ("⚠ " if self.suggest_disable else "")
+        prefix = "⚠ " if self.suggest_disable else ""
         self.label.configure(text=f"{prefix}{self._display_name}", fg=name_color)
+        self._style_lock_btn()
 
     def _enabled_changed(self):
         self.on_change(self.cfg_key, "enabled", self.enabled_var.get())
@@ -1261,14 +1240,23 @@ class App(ctk.CTk):
     # ── priority duplicate detection ─────────────────────────────────────────
 
     def _check_dupe_priorities(self):
-        counts = Counter(self.cfg.priority.values())
+        # Only enabled mods matter for load order — disabled mods all park at 0,
+        # so counting them would flag each other as false duplicates.
+        counts = Counter(
+            self.cfg.priority.get(k, 0)
+            for k in self.cfg.order
+            if self.cfg.enabled.get(k, True)
+        )
         for row in self.rows:
+            enabled = self.cfg.enabled.get(row.cfg_key, True)
             p = self.cfg.priority.get(row.cfg_key, 0)
-            row.set_priority_dupe(counts[p] > 1)
+            row.set_priority_dupe(enabled and counts[p] > 1)
 
     def _find_dupe_priorities(self) -> dict[int, list[str]]:
         groups: dict[int, list[str]] = defaultdict(list)
         for key in self.cfg.order:
+            if not self.cfg.enabled.get(key, True):
+                continue
             p = self.cfg.priority.get(key, 0)
             groups[p].append(key)
         return {p: keys for p, keys in groups.items() if len(keys) > 1}
