@@ -26,6 +26,14 @@ PRIORITY_START = 5
 MAX_PRIORITY = 999
 MIN_PRIORITY = -999
 
+# Severity icons that lead each warning/note. The GUI (_show_notes) renders the
+# first line of every message as a bold header, so line 1 is always
+# "{icon}  {mod name(s)}".
+ICON_SEVERE = "⛔"   # game won't boot, or a whole mod won't load / goes dead
+ICON_CAUTION = "⚠"   # silent partial loss — a feature/registration is dropped
+ICON_ORDER = "\U0001f522"  # a load-order requirement between two mods
+ICON_INFO = "ℹ"     # informational — a chain is forming, or values were adjusted
+
 # Every positive-declared locked mod is placed at least this far above the
 # next-lower mod, rounded up to a clean multiple, so "load last" locked mods
 # don't get crowded as the mod count grows.
@@ -221,25 +229,24 @@ def _build_constraints(
         if m.parse_errors:
             details = "; ".join(m.parse_errors)
             warnings.append(
-                f'"{m.display_name}" could not be fully scanned: {details}. Its '
-                f'metadata and overrides may be missing from this analysis — the '
-                f'archive may be corrupt or its mod.txt unreadable. Re-download or '
-                f'repack it (a bad .zip often needs re-packing with 7-Zip).'
+                f'{ICON_CAUTION}  {m.display_name}\n'
+                f"Couldn't be fully scanned ({details}), so some of its conflicts "
+                f"may be missing here. The archive is likely corrupt — re-download "
+                f"it, or repack it with 7-Zip."
             )
         if m.mod_txt_nested:
             warnings.append(
-                f'"{m.display_name}" ({m.filename}) has its mod.txt nested '
-                f'inside a wrapper folder instead of at the archive root. '
-                f'Metro Mod Loader rejects this layout — repack the archive '
-                f'with mod.txt at the top level.'
+                f'{ICON_SEVERE}  {m.display_name}\n'
+                f"Its mod.txt is buried in a subfolder instead of at the archive "
+                f"root, so Metro Mod Loader won't load it. Repack the archive with "
+                f"mod.txt at the top level."
             )
         if m.ships_database_gd:
             warnings.append(
-                f'"{m.display_name}" ({m.filename}) ships its own '
-                f'res://Scripts/Database.gd. The first such mod wins; any other '
-                f'mod with the same file silently loses, and hardcoded preload() '
-                f'paths inside it may break if companion mods aren\'t loaded. '
-                f'Modern mods should use the [registry] API instead.'
+                f'{ICON_CAUTION}  {m.display_name}\n'
+                f"Ships its own Database.gd. Only the first mod's copy wins — any "
+                f"others are dropped, and its hardcoded preload() paths can break. "
+                f"Modern mods should use the [registry] API instead."
             )
 
     # ── Duplicate display names ───────────────────────────────────────
@@ -259,9 +266,9 @@ def _build_constraints(
             continue
         listed = ", ".join(f'"{m.filename}"' for m in group)
         warnings.append(
-            f'{len(group)} mods share the display name "{group[0].display_name}": '
-            f'{listed}. Likely a fork or accidental dual install — Metro Mod '
-            f'Loader will warn about this too.'
+            f'{ICON_CAUTION}  {len(group)} mods named "{group[0].display_name}"\n'
+            f"{listed} share a name — probably a fork or an accidental "
+            f"double-install. Metro Mod Loader will flag this too."
         )
 
     # ── Duplicate mod IDs ──────────────────────────────────────────────
@@ -274,8 +281,9 @@ def _build_constraints(
         if len(owners) >= 2:
             listed = ", ".join(f'"{name_for[o]}"' for o in owners)
             warnings.append(
-                f'Duplicate mod id "{mid}" is used by {listed}. '
-                f'The mod loader will only load one — disable the duplicates to choose which one.'
+                f'{ICON_CAUTION}  Duplicate mod id "{mid}"\n'
+                f"Used by {listed}. The loader keeps only one — disable the extras "
+                f"to pick which."
             )
             # All but the first are candidates for disable
             suggest_disable.extend(owners[1:])
@@ -296,11 +304,11 @@ def _build_constraints(
             losers = [o for o in uniq if o != keeper]
             disable_names = ", ".join(f'"{name_for[o]}"' for o in losers)
             warnings.append(
-                f'Multiple mods declare `class_name {cn}`: {listed}. '
-                f'Godot refuses to load a project with duplicate class names — '
-                f'the game will not boot with all of these enabled.\n'
-                f'  -> Recommended fix: keep "{name_for[keeper]}" enabled and '
-                f'disable {disable_names}.'
+                f'{ICON_SEVERE}  Duplicate class_name {cn}\n'
+                f"{listed} all declare it, and Godot won't boot a project with two "
+                f"of the same class name — the game won't start with all of these "
+                f"on.\n"
+                f'Fix: keep "{name_for[keeper]}" and disable {disable_names}.'
             )
             suggest_disable.extend(losers)
 
@@ -312,11 +320,11 @@ def _build_constraints(
         if clash:
             listed = ", ".join(f"`{c}`" for c in clash)
             warnings.append(
-                f'"{m.display_name}" declares class_name {listed}, which Road to '
-                f'Vostok already uses. Godot refuses to boot when a mod class_name '
-                f'collides with a vanilla one ("Class hides a global script class") '
-                f'— the game will not start with this mod enabled. The author must '
-                f'rename the class.'
+                f'{ICON_SEVERE}  {m.display_name}\n'
+                f"Declares class_name {listed}, a name Road to Vostok already uses. "
+                f"Godot refuses to boot on that clash, so the game won't start with "
+                f"this mod on. The author has to rename the class.\n"
+                f"[technical: class_name hides a global script class]"
             )
 
     # ── take_over_path on a vanilla class_name script (#83542 crash) ───
@@ -329,13 +337,12 @@ def _build_constraints(
         if risky:
             listed = ", ".join(f"{s}.gd" for s in risky)
             warnings.append(
-                f'"{m.display_name}" uses a risky pattern — take_over_path on '
-                f'vanilla class_name script(s): {listed}. This is usually fine on '
-                f'its own, but it can corrupt Godot\'s class cache (engine bug '
-                f'#83542) and crash when another mod also takes over the same '
-                f"script. It's safer for the author to use the loader's "
-                f'[script_extend] declaration or hooks instead.  '
-                f'[technical: #83542 take_over_path on class_name script]'
+                f'{ICON_CAUTION}  {m.display_name}\n'
+                f"Uses take_over_path on vanilla script(s) {listed}. Fine on its "
+                f"own, but it can corrupt Godot's class cache and crash if another "
+                f"mod takes over the same script. Safer for the author to use the "
+                f"loader's [script_extend] or hooks instead.\n"
+                f"[technical: #83542 take_over_path on class_name script]"
             )
 
     # ── Duplicate autoload names ───────────────────────────────────────
@@ -349,9 +356,9 @@ def _build_constraints(
         if len(owners) >= 2:
             listed = ", ".join(f'"{name_for[o]}"' for o in owners)
             warnings.append(
-                f'Multiple mods declare the same autoload name "{autoload_name}": {listed}. '
-                f'Only one will actually load — the others\' entry points will silently fail. '
-                f'The mod authors should rename to something more specific.'
+                f'{ICON_CAUTION}  Duplicate autoload "{autoload_name}"\n'
+                f"Declared by {listed}. Only one loads — the others' entry points "
+                f"never run. Authors should rename it to something unique."
             )
 
     # ── File-path overlaps ─────────────────────────────────────────────
@@ -376,8 +383,9 @@ def _build_constraints(
         else:
             detail = f"{len(paths)} shared paths (first: {paths[0]})"
         warnings.append(
-            f'{listed} ship the same file path: {detail}. '
-            f'The highest-priority mod wins; the others\' copy of that file is dropped.'
+            f'{ICON_CAUTION}  {listed}\n'
+            f"Ship the same file: {detail}. The highest-numbered mod wins and the "
+            f"others' copy is dropped."
         )
 
     # ── Function-level override constraints ────────────────────────────
@@ -408,8 +416,9 @@ def _build_constraints(
                 if ns != ws:
                     edges[ns].add(ws)
                     notes.append(
-                        f'"{name_for[ws]}" must have a HIGHER load order number than '
-                        f'"{name_for[ns]}", or "{name_for[ws]}" will stop working in-game.  '
+                        f'{ICON_ORDER}  {name_for[ws]}  must load ABOVE  {name_for[ns]}\n'
+                        f'Give "{name_for[ws]}" a higher number, or it stops working '
+                        f'in-game.\n'
                         f'[technical: both touch {base}.{func}()]'
                     )
 
@@ -434,9 +443,9 @@ def _build_constraints(
                     if other != winner:
                         edges[other].add(winner)
                 recommendation = (
-                    f'\n  -> Recommended fix: load "{name_for[winner]}" with the '
-                    f'HIGHEST number of these mods, so it wins this conflict. '
-                    f'The others only lose this one feature and keep working.'
+                    f'\nFix: give "{name_for[winner]}" the HIGHEST number of these '
+                    f'mods so it wins. The others just lose this one feature and '
+                    f'keep working.'
                 )
             elif len(dying) >= 2:
                 # All would die — no load order saves them. Suggest disabling.
@@ -445,29 +454,31 @@ def _build_constraints(
                 suggest_disable.extend(to_disable)
                 disable_names = ", ".join(f'"{name_for[n]}"' for n in to_disable)
                 recommendation = (
-                    f'\n  -> Recommended fix: NO load order will save all of these '
-                    f'mods — only one can be active. Suggest disabling {disable_names} '
-                    f'and keeping "{name_for[keep]}" enabled (it has the most features).'
+                    f'\nFix: no load order saves them all — only one can run. '
+                    f'Disable {disable_names} and keep "{name_for[keep]}" (it has '
+                    f'the most features).'
                 )
 
             if len(nosuper) == 2:
-                header = (f'"{name_for[nosuper[0]]}" and "{name_for[nosuper[1]]}" '
-                          f'both change {feature}.')
+                title = f'{name_for[nosuper[0]]}  &  {name_for[nosuper[1]]}'
+                lead = f'Both change {feature}.'
             else:
                 listed = ", ".join(f'"{name_for[n]}"' for n in nosuper)
-                header = f'{listed} all change {feature}.'
+                title = f'{len(nosuper)} mods change {feature}'
+                lead = f'{listed} all change it.'
 
             consequences = [
-                f'    - {_consequence(name_for[n], severities[n])}'
+                f'  - {_consequence(name_for[n], severities[n])}'
                 for n in nosuper
             ]
 
             warnings.append(
-                f'{header} The mod with the highest load order number wins. '
-                f'What each mod loses if it has a lower number:\n'
+                f'{ICON_CAUTION}  {title}\n'
+                f'{lead} The highest load-order number wins. What each loses with '
+                f'a lower number:\n'
                 + "\n".join(consequences)
                 + recommendation
-                + f'\n  [technical: {base}.{func}()]'
+                + f'\n[technical: {base}.{func}()]'
             )
 
     # ── take_over_path() constraints ───────────────────────────────────
@@ -492,9 +503,9 @@ def _build_constraints(
                     continue
                 edges[t].add(e)
                 notes.append(
-                    f'"{name_for[e]}" must have a HIGHER load order number than '
-                    f'"{name_for[t]}", or "{name_for[e]}" will inherit from the wrong '
-                    f'(vanilla) version of {base}.gd.  '
+                    f'{ICON_ORDER}  {name_for[e]}  must load ABOVE  {name_for[t]}\n'
+                    f'Otherwise "{name_for[e]}" inherits the wrong (vanilla) '
+                    f'{base}.gd.\n'
                     f'[technical: "{name_for[t]}" replaces res://Scripts/{base}.gd via take_over_path()]'
                 )
 
@@ -510,11 +521,10 @@ def _build_constraints(
         if len(tmods) >= 2:
             listed = ", ".join(f'"{name_for[t]}"' for t in tmods)
             notes.append(
-                f'{listed} all replace res://Scripts/{base}.gd via take_over_path. '
-                f'They stack via inheritance — each mod inherits from the one loaded '
-                f'before it, so all of their features remain active. '
-                f'Any function that multiple of them override without super() is listed '
-                f'above as a separate conflict.'
+                f'{ICON_INFO}  {listed}\n'
+                f'All replace {base}.gd and stack via inheritance — each builds on '
+                f'the one before it, so every mod stays active. Any function several '
+                f'of them override without super() is listed above.'
             )
 
     # ── Replace-hook collisions ────────────────────────────────────────
@@ -536,11 +546,12 @@ def _build_constraints(
             continue
         listed = ", ".join(f'"{name_for[o]}"' for o in uniq)
         warnings.append(
-            f'{listed} each REPLACE {_humanize_hook(hook)}. Only one can win — '
-            f'Metro Mod Loader keeps whichever loads FIRST (the LOWEST load order '
-            f'number) and silently ignores the others. If you care which one wins, '
-            f'give it the lowest number. (The losing mods may still work if they '
-            f'fall back to before/after hooks.)  [technical: replace hook "{hook}"]'
+            f'{ICON_CAUTION}  {listed}\n'
+            f'Each replace {_humanize_hook(hook)} — only one can win. Metro Mod '
+            f'Loader keeps whichever loads FIRST (lowest number) and ignores the '
+            f'rest. Want a specific one to win? Give it the lowest number. (Losers '
+            f'may still work via before/after hooks.)\n'
+            f'[technical: replace hook "{hook}"]'
         )
 
     # ── Registry id / zone collisions ──────────────────────────────────
@@ -563,10 +574,11 @@ def _build_constraints(
             continue
         listed = ", ".join(f'"{name_for[o]}"' for o in uniq)
         warnings.append(
-            f'{listed} both add or replace {_humanize_registry(registry, key)}. '
-            f'Metro Mod Loader lets only ONE registration win (the first to '
-            f'load); the others fail silently and their version never appears '
-            f'in-game.  [technical: registry {registry.lower()} "{key}"]'
+            f'{ICON_CAUTION}  {listed}\n'
+            f'Both add or replace {_humanize_registry(registry, key)}. Only the '
+            f'first to load wins — the others fail silently and never show up '
+            f'in-game.\n'
+            f'[technical: registry {registry.lower()} "{key}"]'
         )
 
     # ── Registry patch same-field collisions (xEdit-style) ─────────────
@@ -596,10 +608,10 @@ def _build_constraints(
         flds = ", ".join(sorted(fields_set))
         which = "those fields" if len(fields_set) > 1 else "that field"
         warnings.append(
-            f'{listed} patch the same field(s) on {_humanize_registry(registry, rid)}: '
-            f'{flds}. Patches to different fields would coexist, but these overlap — '
-            f"so the highest load order number wins and the other mods' value for "
-            f'{which} is silently ignored.  '
+            f'{ICON_CAUTION}  {listed}\n'
+            f'Patch the same field(s) on {_humanize_registry(registry, rid)}: '
+            f'{flds}. Different fields would coexist, but these overlap — the '
+            f"highest number wins and the others' value for {which} is ignored.\n"
             f'[technical: patch {registry.lower()} "{rid}" fields: {flds}]'
         )
 
@@ -614,11 +626,11 @@ def _build_constraints(
         if needs:
             listed_reg = ", ".join(r.lower() for r in needs)
             warnings.append(
-                f'"{m.display_name}" uses registry calls that require the '
-                f'[registry] opt-in ({listed_reg}) but its mod.txt has no '
-                f'[registry] section — Metro Mod Loader skips the setup, so those '
-                f'registrations silently do nothing in-game. The author needs to '
-                f'add an empty [registry] section.'
+                f'{ICON_CAUTION}  {m.display_name}\n'
+                f'Uses registry calls ({listed_reg}) that need a [registry] section '
+                f'in mod.txt, but it has none — so Metro Mod Loader skips them and '
+                f'they do nothing in-game. The author needs to add an empty '
+                f'[registry] section.'
             )
 
     # ── Declared dependencies ([dependencies] required=) ───────────────
@@ -638,9 +650,9 @@ def _build_constraints(
             dep_key = id_to_key.get(dep_id)
             if dep_key is None:
                 warnings.append(
-                    f'"{m.display_name}" requires "{dep_id}", which is not '
-                    f'installed. Install it, or "{m.display_name}" may not '
-                    f'work correctly (missing dependency).'
+                    f'{ICON_SEVERE}  {m.display_name}\n'
+                    f'Requires "{dep_id}", which isn\'t installed. Install it or '
+                    f'this mod may not work correctly.'
                 )
             elif dep_key != m.cfg_key:
                 edges[dep_key].add(m.cfg_key)
@@ -661,9 +673,10 @@ def _build_constraints(
             listed = ", ".join(f'"{m.display_name}"' for m in mcm_users[:8])
             more = "" if len(mcm_users) <= 8 else f" (+{len(mcm_users) - 8} more)"
             warnings.append(
-                f'{len(mcm_users)} mod(s) reference Mod Configuration Menu but MCM is not '
-                f'installed: {listed}{more}. Their in-game settings UIs will not appear. '
-                f'Install "Mod Configuration Menu" from ModWorkshop to enable them.'
+                f'{ICON_CAUTION}  Mod Configuration Menu not installed\n'
+                f'{len(mcm_users)} mod(s) need it for their in-game settings UI: '
+                f'{listed}{more}. Install "Mod Configuration Menu" from ModWorkshop '
+                f'to enable them.'
             )
 
     return edges, warnings, notes, suggest_disable
@@ -701,8 +714,9 @@ def _topo_sort(nodes: list[str], edges: dict[str, set[str]]) -> tuple[list[str],
     if len(out) != len(nodes):
         leftover = [n for n in nodes if n not in out]
         warnings.append(
-            f"Conflict cycle detected involving: {', '.join(leftover)}. "
-            f"Falling back to alphabetical order for these."
+            f"{ICON_CAUTION}  Conflict loop\n"
+            f"These mods form a dependency cycle: {', '.join(leftover)}. Falling "
+            f"back to alphabetical order for them."
         )
         out.extend(sorted(leftover))
 
@@ -763,9 +777,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         first_target = MAX_PRIORITY - (k - 1)
         if first_target <= floor:
             warnings.append(
-                f"Too many locked-priority mods to fit unique values under "
-                f"{MAX_PRIORITY}. Some will end up sharing a priority and MML "
-                f"will break the tie by name."
+                f"{ICON_CAUTION}  Too many locked-priority mods\n"
+                f"Can't fit unique values under {MAX_PRIORITY}, so some will share "
+                f"a number and MML breaks the tie by mod name."
             )
             first_target = max(floor + 1, first_target)
         for idx, rm in enumerate(remaining):
@@ -775,8 +789,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 bump_info[rm.cfg_key] = (original, t)
                 effective_priority[rm.cfg_key] = t
         notes.append(
-            f"{k} locked-priority mod(s) packed densely at the top because the "
-            f"natural {LOCKED_BUMP_AMOUNT}-step cascade would exceed {MAX_PRIORITY}."
+            f"{ICON_INFO}  Locked priorities packed tight\n"
+            f"{k} locked-priority mod(s) packed at the top — the normal "
+            f"{LOCKED_BUMP_AMOUNT}-step spacing would run past {MAX_PRIORITY}."
         )
 
     locked_values = set(effective_priority.values())
@@ -793,8 +808,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 f"so it stays above the other mods and continues to load last"
             )
             notes.append(
-                f'"{m.display_name}" was bumped from {original} to {pri} '
-                f'so it stays separated from the other mods and continues to load last.'
+                f'{ICON_INFO}  {m.display_name}\n'
+                f"Bumped from {original} to {pri} so it stays clear of the other "
+                f"mods and keeps loading last."
             )
         else:
             reason = f"declared in mod.txt (priority={pri})"
@@ -855,9 +871,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 slot = MAX_PRIORITY
                 if not overflow_warned:
                     warnings.append(
-                        f"More mods than available priority slots in "
-                        f"[{PRIORITY_START}, {MAX_PRIORITY}]. Some mods will "
-                        f"share a priority and MML will load them by name."
+                        f"{ICON_CAUTION}  Out of priority slots\n"
+                        f"More mods than slots in [{PRIORITY_START}, {MAX_PRIORITY}] "
+                        f"— some will share a number and MML loads them by name."
                     )
                     overflow_warned = True
 
@@ -884,9 +900,10 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 continue
             if assigned[src] >= assigned[dst]:
                 warnings.append(
-                    f'Load order problem: "{name_for[dst]}" (load order {assigned[dst]}) '
-                    f'needs a HIGHER number than "{name_for[src]}" (load order {assigned[src]}). '
-                    f'Manually change "{name_for[dst]}" to a number greater than {assigned[src]}.'
+                    f'{ICON_ORDER}  {name_for[dst]}  needs a higher number\n'
+                    f'Set "{name_for[dst]}" (now {assigned[dst]}) above '
+                    f'"{name_for[src]}" (now {assigned[src]}) — pick any number '
+                    f'greater than {assigned[src]}.'
                 )
 
     # Tie detection — safety net for declared-priority collisions that the
@@ -900,10 +917,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         if len(owners) >= 2:
             listed = ", ".join(f'"{name_for[o]}"' for o in owners)
             warnings.append(
-                f'Load order {v} is shared by {len(owners)} mods: {listed}. '
-                f'Metro Mod Loader breaks ties by mod name, which can change '
-                f'after an archive rename. Manually adjust their priorities '
-                f'so each mod has a unique number.'
+                f'{ICON_CAUTION}  Load order {v} used by {len(owners)} mods\n'
+                f'{listed}. MML breaks ties by mod name, which changes after an '
+                f'archive rename — give each a unique number.'
             )
 
     # Sort final list by priority (low to high) for display

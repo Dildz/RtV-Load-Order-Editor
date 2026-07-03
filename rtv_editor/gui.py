@@ -9,7 +9,10 @@ from tkinter import messagebox, ttk
 
 import customtkinter as ctk
 
-from .analyzer import MAX_PRIORITY, PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze
+from .analyzer import (
+    ICON_CAUTION, ICON_INFO, ICON_ORDER, ICON_SEVERE,
+    MAX_PRIORITY, PRIORITY_START, PRIORITY_STEP, AnalysisResult, analyze,
+)
 from .config_io import ModConfig, read_config, sync_with_mods, write_config
 from .mod_patcher import extract_modworkshop_id, patch_mod_archive
 from .paths import (MOD_CONFIG_FILE, get_mods_folder, load_manual_locks,
@@ -849,6 +852,7 @@ class App(ctk.CTk):
             fg_color="transparent", border_width=0,
         )
         self.notes_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._configure_note_tags()
         self.notes_box.configure(state="disabled")
         self.notes_visible = False
         self.notes_height: int | None = None  # last dragged pane height, px
@@ -924,8 +928,33 @@ class App(ctk.CTk):
             # +40 buffer so there's a small gap between the title and the
             # button row instead of them butting right up against each other.
             want_w = int(self._toolbar.winfo_reqwidth() / scaling) + 2 * 18 + 40
-            cur_h = int(self.winfo_height() / scaling)
-            self.geometry(f"{want_w}x{cur_h}")
+            want_w_phys = round(want_w * scaling)
+            # Open filling the vertical work area (screen minus taskbar) — the mod
+            # list is long and users otherwise drag the window taller every time.
+            # Tk's geometry() sets the *client* size, and Windows adds a caption
+            # plus ~7px invisible DWM resize borders (DPI-unadjusted), so no
+            # client-size math lands cleanly on the work area. Instead ask Windows
+            # for the work-area rect (SPI_GETWORKAREA) and size the *outer* window
+            # to it via MoveWindow — the invisible border then sits outside the
+            # visible frame (tiny bottom gap) rather than clipping past the taskbar.
+            import ctypes
+
+            class _RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+            wa = _RECT()
+            ok = ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0)
+            work_h = wa.bottom - wa.top
+            if ok and work_h > 400:
+                work_w = wa.right - wa.left
+                hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+                x = wa.left + max(0, (work_w - want_w_phys) // 2)
+                ctypes.windll.user32.MoveWindow(hwnd, x, wa.top, want_w_phys, work_h, True)
+            else:
+                # Fallback if the work-area query fails: fit width, leave a margin.
+                cur_h = int(self.winfo_screenheight() / scaling) - 80
+                self.geometry(f"{want_w}x{cur_h}")
             self.minsize(want_w, 480)
             if self._splash is not None:
                 self._splash.destroy()
@@ -1074,7 +1103,7 @@ class App(ctk.CTk):
 
         self._rebuild_rows()
         self._show_notes(result)
-        self._show_notes_pane()  # auto-open so the analysis output is visible
+        self._show_notes_pane(maximize=True)  # auto-open as large as it'll go
         self.dirty = True
         self._set_status("Analysis applied — review and Save")
 
@@ -1252,14 +1281,15 @@ class App(ctk.CTk):
         else:
             self._show_notes_pane()
 
-    def _show_notes_pane(self):
-        """Add the notes pane to the split (if not already) and expand it,
-        restoring the last dragged height."""
+    def _show_notes_pane(self, maximize: bool = False):
+        """Add the notes pane to the split (if not already) and expand it.
+        maximize=True gives notes all the room it can (mod list at its minsize) —
+        used after Analyze; otherwise the last dragged height is restored."""
         if not self.notes_visible:
             self.paned.add(self.notes_container, minsize=100, stretch="never")
             self.notes_visible = True
             self.notes_btn.configure(text="Notes ▼")
-        self.after(50, self._expand_notes_pane)
+        self.after(50, lambda: self._expand_notes_pane(maximize))
 
     def _hide_notes_pane(self):
         """Collapse the notes pane so the mod list gets the full height.
@@ -1277,14 +1307,17 @@ class App(ctk.CTk):
             if h > 20:  # ignore a not-yet-laid-out pane
                 self.notes_height = h
 
-    def _expand_notes_pane(self):
+    def _expand_notes_pane(self, maximize: bool = False):
         if not self.notes_visible:
             return
         self.update_idletasks()
         paned_h = self.paned.winfo_height()
-        notes_h = self.notes_height or max(220, int(paned_h * 0.35))
-        # Keep the mod list usable — never let notes eat below its minsize.
-        notes_h = min(notes_h, max(100, paned_h - 140))
+        # Keep the mod list usable — never let notes eat below its 140px minsize.
+        max_notes = max(100, paned_h - 140)
+        if maximize:
+            notes_h = max_notes
+        else:
+            notes_h = min(self.notes_height or max(220, int(paned_h * 0.35)), max_notes)
         self.paned.sash_place(0, 1, paned_h - notes_h)
 
     def _setup_smooth_scroll(self):
@@ -1354,22 +1387,52 @@ class App(ctk.CTk):
         # Re-point the scrollbar so drag goes through our throttle too.
         self.list_frame._scrollbar.configure(command=_flushed_yview)
 
+    def _configure_note_tags(self):
+        """Text tags for the notes box. Tk 8.6 renders emoji monochrome, so we
+        color the severity icon + header line ourselves via tag foregrounds."""
+        box = self.notes_box._textbox
+        bold = (FONT_BODY[0], FONT_BODY[1], "bold")
+        header_styles = {
+            ICON_SEVERE: COLOR_DUPE,        # red — game won't boot / mod dead
+            ICON_CAUTION: COLOR_WARNING[1],  # amber — silent partial loss
+            ICON_ORDER: COLOR_ACCENT,        # blue — load-order requirement
+            ICON_INFO: _TEXT_MUTED_FG,       # gray — informational
+        }
+        for icon, color in header_styles.items():
+            box.tag_configure(f"hdr_{icon}", foreground=color, font=bold,
+                              spacing1=8, spacing3=2)
+        box.tag_configure("note_body", foreground=_TEXT_FG, lmargin1=26, lmargin2=26)
+        box.tag_configure("note_tech", foreground=_TEXT_DIM_FG,
+                          lmargin1=26, lmargin2=26)
+        box.tag_configure("note_divider", foreground="#3a3a3a", spacing3=6)
+        box.tag_configure("note_section", foreground=_TEXT_MUTED_FG,
+                          font=FONT_SECTION, spacing1=6, spacing3=4)
+
     def _show_notes(self, result: AnalysisResult):
         self.notes_box.configure(state="normal")
         self.notes_box.delete("1.0", "end")
 
+        def render_entry(text: str):
+            title, _, body = text.partition("\n")
+            self.notes_box.insert("end", title + "\n", f"hdr_{title[:1]}")
+            for line in body.splitlines():
+                tag = "note_tech" if line.lstrip().startswith("[technical") else "note_body"
+                self.notes_box.insert("end", line + "\n", tag)
+            self.notes_box.insert("end", "─" * 40 + "\n", "note_divider")
+
         if result.warnings:
-            self.notes_box.insert("end", "MOD CONFLICTS (some mods may not work)\n")
+            self.notes_box.insert("end", "MOD CONFLICTS\n", "note_section")
             for w in result.warnings:
-                self.notes_box.insert("end", f"  - {w}\n\n")
+                render_entry(w)
 
         if result.notes:
-            self.notes_box.insert("end", "REQUIRED LOAD ORDER\n")
+            self.notes_box.insert("end", "REQUIRED LOAD ORDER\n", "note_section")
             for n in result.notes:
-                self.notes_box.insert("end", f"  - {n}\n\n")
+                render_entry(n)
 
         if not result.warnings and not result.notes:
-            self.notes_box.insert("end", "No conflicts detected — your load order is clean.\n")
+            self.notes_box.insert("end", "No conflicts detected — your load order is clean.\n",
+                                  "note_body")
 
         self.notes_box.configure(state="disabled")
 
