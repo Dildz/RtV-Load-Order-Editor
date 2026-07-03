@@ -776,11 +776,8 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         k = len(remaining)
         first_target = MAX_PRIORITY - (k - 1)
         if first_target <= floor:
-            warnings.append(
-                f"{ICON_CAUTION}  Too many locked-priority mods\n"
-                f"Can't fit unique values under {MAX_PRIORITY}, so some will share "
-                f"a number and MML breaks the tie by mod name."
-            )
+            # The dedup pass below guarantees uniqueness across the full range,
+            # so just start above the floor here — no warning needed.
             first_target = max(floor + 1, first_target)
         for idx, rm in enumerate(remaining):
             t = min(first_target + idx, MAX_PRIORITY)
@@ -833,7 +830,6 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
     used_priorities: set[int] = set(locked_values)
     next_value = PRIORITY_START
     next_top_slot = MAX_PRIORITY  # descending cursor for overflow fallback
-    overflow_warned = False
 
     for key in sorted_free:
         # Bump past any value already used (by a locked mod or a prior free mod)
@@ -868,14 +864,9 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
                 slot = next_top_slot
                 next_top_slot -= 1
             else:
+                # Ran out of [PRIORITY_START, MAX_PRIORITY] slots; drop to MAX and
+                # let the dedup pass below spread these across the full range.
                 slot = MAX_PRIORITY
-                if not overflow_warned:
-                    warnings.append(
-                        f"{ICON_CAUTION}  Out of priority slots\n"
-                        f"More mods than slots in [{PRIORITY_START}, {MAX_PRIORITY}] "
-                        f"— some will share a number and MML loads them by name."
-                    )
-                    overflow_warned = True
 
         recs.append(Recommendation(
             cfg_key=key,
@@ -887,6 +878,40 @@ def analyze(mods: list[ModInfo]) -> AnalysisResult:
         assigned[key] = slot
         used_priorities.add(slot)
         next_value += PRIORITY_STEP
+
+    # ── Guarantee unique load numbers ──────────────────────────────────
+    # MML breaks duplicate priorities by mod name (unstable across archive
+    # renames), so every mod must end up with a distinct value. The valid range
+    # [MIN_PRIORITY, MAX_PRIORITY] holds ~1999 slots — far more than any real mod
+    # list — so a free slot always exists. Resolve collisions highest-first,
+    # nudging the loser to the nearest free slot (downward first) so a "load
+    # last" pile at the ceiling fans out to 999, 998, 997… while the mod with the
+    # strongest declared intent keeps the top slot.
+    declared_of = {m.cfg_key: m.declared_priority for m in locked}
+    dedup_order = sorted(
+        assigned,
+        key=lambda k: (-assigned[k], -declared_of.get(k, 0), k.lower()),
+    )
+    used_final: set[int] = set()
+    for key in dedup_order:
+        v = assigned[key]
+        if v not in used_final:
+            used_final.add(v)
+            continue
+        nv = v
+        for d in range(1, MAX_PRIORITY - MIN_PRIORITY + 1):
+            if v - d >= MIN_PRIORITY and (v - d) not in used_final:
+                nv = v - d
+                break
+            if v + d <= MAX_PRIORITY and (v + d) not in used_final:
+                nv = v + d
+                break
+        assigned[key] = nv
+        used_final.add(nv)
+
+    # Propagate any moves back onto the recommendations built above.
+    for r in recs:
+        r.priority = assigned[r.cfg_key]
 
     # Final sweep: verify every constraint edge is satisfied. Anything still
     # broken (e.g. free mod must load BEFORE a locked mod with a low value) is
